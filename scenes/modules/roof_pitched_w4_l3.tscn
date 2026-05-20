@@ -1,0 +1,52 @@
+[gd_scene format=3]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_j1l6b"]
+albedo_color = Color(0.78, 0.8, 0.83, 1)
+roughness = 0.88
+
+[sub_resource type="BoxMesh" id="BoxMesh_dsxby"]
+size = Vector3(12.8, 0.9504, 9.56)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8vmxt"]
+albedo_color = Color(0.56, 0.59, 0.63, 1)
+roughness = 0.8
+
+[sub_resource type="BoxMesh" id="BoxMesh_1401p"]
+size = Vector3(12.84, 0.14, 5.1415668)
+
+[sub_resource type="BoxMesh" id="BoxMesh_e7fka"]
+size = Vector3(12.82, 0.08, 0.12)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_rdeun"]
+albedo_color = Color(0.7, 0.72, 0.75, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_cmx3j"]
+size = Vector3(12.8, 0.06, 9.6)
+
+[node name="Roof_Pitched" type="Node3D" unique_id=1179672021]
+
+[node name="Roof_Fill" type="MeshInstance3D" parent="." unique_id=1754082538]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.4752, 0)
+material_override = SubResource("StandardMaterial3D_j1l6b")
+mesh = SubResource("BoxMesh_dsxby")
+
+[node name="Roof_Left" type="MeshInstance3D" parent="." unique_id=149405023]
+transform = Transform3D(1, 0, 0, 0, 0.9408874, 0.33871946, 0, -0.33871946, 0.9408874, 0, 4.7794, -2.4)
+material_override = SubResource("StandardMaterial3D_8vmxt")
+mesh = SubResource("BoxMesh_1401p")
+
+[node name="Roof_Right" type="MeshInstance3D" parent="." unique_id=217098169]
+transform = Transform3D(1, 0, 0, 0, 0.9408874, -0.33871946, 0, 0.33871946, 0.9408874, 0, 4.7794, 2.4)
+material_override = SubResource("StandardMaterial3D_8vmxt")
+mesh = SubResource("BoxMesh_1401p")
+
+[node name="Ridge_Cap" type="MeshInstance3D" parent="." unique_id=1831516813]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.6584, 0)
+material_override = SubResource("StandardMaterial3D_8vmxt")
+mesh = SubResource("BoxMesh_e7fka")
+
+[node name="Soffit" type="MeshInstance3D" parent="." unique_id=1953924933]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.03, 0)
+material_override = SubResource("StandardMaterial3D_rdeun")
+mesh = SubResource("BoxMesh_cmx3j")

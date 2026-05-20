@@ -1,0 +1,178 @@
+[gd_scene load_steps=7 format=3 uid="uid://b8dhsqaqx6h2n"]
+
+[ext_resource type="Script" path="res://scripts/city_generator.gd" id="1_city"]
+[ext_resource type="Script" path="res://scripts/street_walker.gd" id="2_cam"]
+[ext_resource type="Script" path="res://scripts/pedestrian_crowd.gd" id="3_crowd"]
+[ext_resource type="Script" path="res://scripts/population_simulator.gd" id="4_population"]
+[ext_resource type="Script" path="res://scripts/population_ui.gd" id="5_population_ui"]
+[ext_resource type="Script" path="res://scripts/time_of_day_atmosphere.gd" id="6_atmosphere"]
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 2
+ambient_light_source = 3
+ambient_light_color = Color(1, 1, 1, 1)
+ambient_light_energy = 0.6
+ssao_enabled = false
+sdfgi_enabled = false
+
+[node name="Main" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_1")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(0, 24, 0)
+rotation = Vector3(-0.9, 0.75, 0)
+light_energy = 1.2
+shadow_enabled = false
+
+[node name="City" type="Node3D" parent="."]
+script = ExtResource("1_city")
+grid_size = Vector2i(10, 10)
+block_size = 16.0
+street_width = 6.0
+min_floors = 2
+max_floors = 4
+floor_height = 2.6
+seed_value = 7
+terrain_height = 11.5
+terrain_frequency = 0.0195
+stair_trigger_height = 1.1
+stair_step_rise = 0.17
+global_height_quantum = 0.17
+stair_step_tread = 0.3
+stair_landing_length = 1.2
+road_step_run = 0.35
+
+[node name="Population" type="Node" parent="."]
+script = ExtResource("4_population")
+city_path = NodePath("../City")
+min_population = 140
+max_population = 280
+residents_per_block = 2.0
+simulation_year = 2026
+hours_per_second = 0.25
+
+[node name="Crowd" type="Node3D" parent="."]
+script = ExtResource("3_crowd")
+city_path = NodePath("../City")
+population_path = NodePath("../Population")
+camera_path = NodePath("../Camera3D")
+min_pedestrians = 42
+max_pedestrians = 68
+density_per_block = 0.62
+show_identity_labels = false
+max_active_event_effects = 24
+crowd_update_slices = 3
+max_detailed_pedestrians = 12
+
+[node name="Camera3D" type="Camera3D" parent="."]
+position = Vector3(0, 2, 0)
+rotation = Vector3(-0.12, 0, 0)
+current = true
+script = ExtResource("2_cam")
+city_path = NodePath("../City")
+move_speed = 5.0
+turn_speed = 1.95
+ground_look_pitch = -0.12
+ground_height_offset = 0.0
+overlook_look_pitch = -0.52
+overlook_height_offset = 18.0
+initial_view_mode = "ground"
+
+[node name="PreviewLabel" type="Label3D" parent="."]
+position = Vector3(0, 3.4, 0)
+text = "Hillside city population sim  |  Arrow keys move/turn"
+billboard = 1
+pixel_size = 0.01
+modulate = Color(1, 1, 1, 0.8)
+
+[node name="Atmosphere" type="Node3D" parent="."]
+script = ExtResource("6_atmosphere")
+population_path = NodePath("../Population")
+sun_path = NodePath("../Sun")
+environment_path = NodePath("../WorldEnvironment")
+city_path = NodePath("../City")
+
+[node name="PopulationUI" type="CanvasLayer" parent="."]
+script = ExtResource("5_population_ui")
+population_path = NodePath("../Population")
+crowd_path = NodePath("../Crowd")
+camera_path = NodePath("../Camera3D")
+
+[node name="Panel" type="PanelContainer" parent="PopulationUI"]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 430.0
+offset_bottom = 728.0
+
+[node name="Margin" type="MarginContainer" parent="PopulationUI/Panel"]
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 12
+
+[node name="VBox" type="VBoxContainer" parent="PopulationUI/Panel/Margin"]
+
+[node name="Summary" type="RichTextLabel" parent="PopulationUI/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 110)
+bbcode_enabled = true
+fit_content = true
+scroll_active = false
+
+[node name="Controls" type="GridContainer" parent="PopulationUI/Panel/Margin/VBox"]
+columns = 2
+
+[node name="TogglePause" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Pause"
+
+[node name="CycleSpeed" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Speed"
+
+[node name="Advance6Hours" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "+6 hours"
+
+[node name="AdvanceYear" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "+1 year"
+
+[node name="NextResident" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Next resident"
+
+[node name="NextHousehold" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Next household"
+
+[node name="JumpToSelection" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Jump camera"
+
+[node name="ShowPopulation" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Residents"
+
+[node name="ShowHouseholds" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Households"
+
+[node name="PrevPage" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Prev page"
+
+[node name="NextPage" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+text = "Next page"
+
+[node name="Spacer" type="Control" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+custom_minimum_size = Vector2(0, 0)
+
+[node name="Selection" type="RichTextLabel" parent="PopulationUI/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 180)
+bbcode_enabled = true
+fit_content = true
+scroll_active = false
+
+[node name="List" type="RichTextLabel" parent="PopulationUI/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 280)
+bbcode_enabled = true
+fit_content = true
+scroll_active = true
+
+[node name="Events" type="RichTextLabel" parent="PopulationUI/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 96)
+bbcode_enabled = true
+fit_content = true
+scroll_active = true

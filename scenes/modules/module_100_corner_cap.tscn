@@ -1,0 +1,15 @@
+[gd_scene format=3]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_rdeun"]
+albedo_color = Color(0.7, 0.72, 0.75, 1)
+roughness = 0.82
+
+[sub_resource type="BoxMesh" id="BoxMesh_oaevx"]
+size = Vector3(0.25, 3, 0.25)
+
+[node name="Corner_100" type="Node3D" unique_id=1623905316]
+
+[node name="CornerColumn" type="MeshInstance3D" parent="." unique_id=2042051795]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+material_override = SubResource("StandardMaterial3D_rdeun")
+mesh = SubResource("BoxMesh_oaevx")
