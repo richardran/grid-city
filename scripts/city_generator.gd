@@ -1,6 +1,7 @@
 extends Node3D
 
 const BarcelonaBlockGenerator = preload("res://scripts/barcelona_block_generator.gd")
+const BuildingAPI = preload("res://scripts/building_api.gd")
 
 const DISTRICT_CIVIC_CORE := "civic_core"
 const DISTRICT_MARKET_SPINE := "market_spine"
@@ -14,7 +15,7 @@ const DISTRICT_HILLSIDE_QUARTER := "hillside_quarter"
 @export var min_floors: int = 2
 @export var max_floors: int = 4
 @export var floor_height: float = 2.8
-@export var seed_value: int = 1337
+@export var seed_value: int = 0
 @export var regenerate_on_ready: bool = true
 @export var city_base_margin: float = 12.0
 
@@ -48,6 +49,11 @@ const DISTRICT_HILLSIDE_QUARTER := "hillside_quarter"
 @export var planter_thickness: float = 0.45
 @export var vine_thickness: float = 0.18
 
+@export_group("Cheap Night Lighting")
+@export var enable_fake_street_lamps: bool = true
+@export_range(0.1, 1.0, 0.05) var residential_window_fill_ratio: float = 0.62
+@export_range(0.1, 1.0, 0.05) var mixed_use_window_fill_ratio: float = 0.86
+
 const FLOWER_ASSET_PATHS: Array[String] = [
 	"res://assets/foliage/kenney/flower_yellowA.glb",
 	"res://assets/foliage/kenney/flower_redB.glb",
@@ -65,6 +71,9 @@ const VENUE_STYLE_PRESETS := {
 		"stripe_color": Color(0.77, 0.61, 0.44),
 		"stripe_alt": Color(0.93, 0.84, 0.71),
 		"window_glow": Color(1.0, 0.82, 0.58),
+		"lamp_glow": Color(1.0, 0.76, 0.54),
+		"accent_color": Color(0.54, 0.34, 0.23),
+		"planter_color": Color(0.32, 0.40, 0.24),
 		"decor": "cafe"
 	},
 	"bookstore": {
@@ -72,6 +81,9 @@ const VENUE_STYLE_PRESETS := {
 		"stripe_color": Color(0.73, 0.76, 0.82),
 		"stripe_alt": Color(0.92, 0.92, 0.89),
 		"window_glow": Color(0.88, 0.92, 1.0),
+		"lamp_glow": Color(0.96, 0.88, 0.72),
+		"accent_color": Color(0.30, 0.34, 0.43),
+		"planter_color": Color(0.26, 0.35, 0.29),
 		"decor": "books"
 	},
 	"bakery": {
@@ -79,6 +91,9 @@ const VENUE_STYLE_PRESETS := {
 		"stripe_color": Color(0.86, 0.69, 0.52),
 		"stripe_alt": Color(0.97, 0.88, 0.76),
 		"window_glow": Color(1.0, 0.85, 0.70),
+		"lamp_glow": Color(1.0, 0.80, 0.62),
+		"accent_color": Color(0.55, 0.31, 0.20),
+		"planter_color": Color(0.42, 0.36, 0.22),
 		"decor": "bread"
 	}
 }
@@ -101,16 +116,18 @@ var _foundation_material: StandardMaterial3D
 var _wall_material: StandardMaterial3D
 var _house_trim_material: StandardMaterial3D
 var _house_body_materials: Array[StandardMaterial3D] = []
-var _window_material: StandardMaterial3D
 var _track_material: StandardMaterial3D
 var _railing_material: StandardMaterial3D
 var _planter_material: StandardMaterial3D
 var _foliage_material: StandardMaterial3D
 var _vine_material: StandardMaterial3D
+var _lamp_post_material: StandardMaterial3D
 var _flower_scenes: Array[PackedScene] = []
 var _planter_bush_scene: PackedScene
 var _cascade_plant_scene: PackedScene
 var _missing_optional_assets: Dictionary = {}
+var _emissive_material_profiles: Array = []
+var _lighting_state: Dictionary = {}
 
 func _ready() -> void:
 	_setup_materials()
@@ -123,6 +140,7 @@ func generate_city() -> void:
 		_setup_materials()
 	if _flower_scenes.is_empty() and _planter_bush_scene == null and _cascade_plant_scene == null:
 		_setup_foliage_assets()
+	_ensure_runtime_seed()
 	_rng.seed = seed_value
 	_main_avenue_x = maxi(1, int(grid_size.x / 2))
 	_signature_cross_z = maxi(1, int(grid_size.y / 2))
@@ -131,6 +149,7 @@ func generate_city() -> void:
 	_compute_city_base_height()
 	_walk_areas.clear()
 	_building_slots.clear()
+	_emissive_material_profiles.clear()
 
 	if is_instance_valid(_generated_root):
 		_generated_root.queue_free()
@@ -142,6 +161,18 @@ func generate_city() -> void:
 	_create_city_base()
 	_create_roads()
 	_create_blocks()
+	_create_street_lamps()
+	apply_lighting_state(_default_lighting_state())
+
+
+func _ensure_runtime_seed() -> void:
+	if seed_value != 0:
+		return
+	var ticks: int = Time.get_ticks_usec()
+	var unix_time: int = Time.get_unix_time_from_system()
+	seed_value = int(abs((ticks ^ unix_time ^ int(get_instance_id())) % 2147483647))
+	if seed_value == 0:
+		seed_value = 1
 
 func _setup_noise() -> void:
 	_terrain_noise = FastNoiseLite.new()
@@ -187,14 +218,6 @@ func _setup_materials() -> void:
 		mat.roughness = 0.84
 		_house_body_materials.append(mat)
 
-	_window_material = StandardMaterial3D.new()
-	_window_material.albedo_color = Color(0.75, 0.79, 0.84)
-	_window_material.emission_enabled = true
-	_window_material.emission = Color(0.95, 0.92, 0.75)
-	_window_material.emission_energy_multiplier = 0.2
-	_window_material.metallic = 0.08
-	_window_material.roughness = 0.26
-
 	_track_material = StandardMaterial3D.new()
 	_track_material.albedo_color = Color(0.24, 0.20, 0.18)
 	_track_material.metallic = 0.45
@@ -217,6 +240,11 @@ func _setup_materials() -> void:
 	_vine_material.albedo_color = Color(0.31, 0.54, 0.28)
 	_vine_material.roughness = 1.0
 
+	_lamp_post_material = StandardMaterial3D.new()
+	_lamp_post_material.albedo_color = Color(0.22, 0.23, 0.27)
+	_lamp_post_material.metallic = 0.34
+	_lamp_post_material.roughness = 0.44
+
 func _setup_foliage_assets() -> void:
 	_flower_scenes.clear()
 	for asset_path in FLOWER_ASSET_PATHS:
@@ -225,6 +253,162 @@ func _setup_foliage_assets() -> void:
 			_flower_scenes.append(flower_scene)
 	_planter_bush_scene = _load_optional_packed_scene(PLANTER_BUSH_ASSET_PATH)
 	_cascade_plant_scene = _load_optional_packed_scene(CASCADE_PLANT_ASSET_PATH)
+
+
+func _default_lighting_state() -> Dictionary:
+	return {
+		"daylight": 1.0,
+		"night": 0.0,
+		"blue_hour": 0.0,
+		"warm_hour": 0.0,
+		"window_strength": 0.06,
+		"storefront_strength": 0.0,
+		"lamp_strength": 0.0,
+		"window_color_bias": Color(0.98, 0.84, 0.66)
+	}
+
+
+func apply_lighting_state(state: Dictionary) -> void:
+	_lighting_state = state.duplicate(true)
+	BuildingAPI.apply_lighting_state(_lighting_state)
+	for profile in _emissive_material_profiles:
+		var material := profile.get("material") as StandardMaterial3D
+		if material == null:
+			continue
+		_apply_emissive_profile(material, profile, _lighting_state)
+
+
+func get_lighting_debug_snapshot() -> Dictionary:
+	var lamp_count: int = 0
+	var storefront_count: int = 0
+	var window_count: int = 0
+	for profile in _emissive_material_profiles:
+		match String(profile.get("category", "")):
+			"lamp_bulb":
+				lamp_count += 1
+			"storefront_window":
+				storefront_count += 1
+			"house_window":
+				window_count += 1
+	return {
+		"emissive_profiles": _emissive_material_profiles.size(),
+		"house_windows": window_count,
+		"storefront_windows": storefront_count,
+		"street_lamps": lamp_count,
+		"lighting_state": _lighting_state.duplicate(true)
+	}
+
+
+func _register_emissive_material(material: StandardMaterial3D, category: String, base_color: Color, seed: int, strength: float = 1.0, occupied: float = 1.0, cool_color: Color = Color(0.66, 0.80, 0.92)) -> StandardMaterial3D:
+	var profile := {
+		"material": material,
+		"category": category,
+		"base_color": base_color,
+		"seed": seed,
+		"strength": strength,
+		"occupied": occupied,
+		"cool_color": cool_color
+	}
+	_emissive_material_profiles.append(profile)
+	_apply_emissive_profile(material, profile, _lighting_state if not _lighting_state.is_empty() else _default_lighting_state())
+	return material
+
+
+func _apply_emissive_profile(material: StandardMaterial3D, profile: Dictionary, state: Dictionary) -> void:
+	var category: String = str(profile.get("category", "house_window"))
+	var base_color: Color = Color(profile.get("base_color", Color(1.0, 0.84, 0.66)))
+	var cool_color: Color = Color(profile.get("cool_color", Color(0.66, 0.80, 0.92)))
+	var strength: float = float(profile.get("strength", 1.0))
+	var occupied: float = float(profile.get("occupied", 1.0))
+	var daylight: float = float(state.get("daylight", 1.0))
+	var night: float = float(state.get("night", 0.0))
+	var blue_hour: float = float(state.get("blue_hour", 0.0))
+	var warm_hour: float = float(state.get("warm_hour", 0.0))
+	var window_strength: float = float(state.get("window_strength", 0.05))
+	var storefront_strength: float = float(state.get("storefront_strength", 0.0))
+	var lamp_strength: float = float(state.get("lamp_strength", 0.0))
+	match category:
+		"storefront_window":
+			var storefront_mix: float = clampf(storefront_strength * occupied, 0.0, 1.0)
+			material.albedo_color = cool_color.lerp(base_color, 0.68 + warm_hour * 0.24)
+			material.emission_enabled = true
+			material.emission = cool_color.lerp(base_color, 0.58 + warm_hour * 0.32)
+			material.emission_energy_multiplier = 0.08 + storefront_mix * (0.42 + strength * 0.96)
+		"storefront_pool":
+			var pool_mix: float = clampf(storefront_strength * strength, 0.0, 1.0)
+			material.albedo_color = Color(base_color.r, base_color.g, base_color.b, 0.03 + pool_mix * 0.13)
+			material.emission_enabled = true
+			material.emission = base_color
+			material.emission_energy_multiplier = pool_mix * 1.08
+		"lamp_bulb":
+			var bulb_mix: float = clampf(lamp_strength * (0.86 + occupied * 0.14), 0.0, 1.0)
+			material.albedo_color = base_color.lerp(Color(1.0, 0.97, 0.88), 0.28)
+			material.emission_enabled = true
+			material.emission = base_color
+			material.emission_energy_multiplier = 0.06 + bulb_mix * (1.1 + strength * 0.45)
+		"lamp_pool":
+			var lamp_pool_mix: float = clampf(lamp_strength * strength, 0.0, 1.0)
+			material.albedo_color = Color(base_color.r, base_color.g, base_color.b, 0.02 + lamp_pool_mix * 0.12)
+			material.emission_enabled = true
+			material.emission = base_color
+			material.emission_energy_multiplier = lamp_pool_mix * 0.92
+		_:
+			var window_mix: float = clampf((window_strength * occupied) + blue_hour * 0.08 * occupied, 0.0, 1.0)
+			material.albedo_color = Color(0.60, 0.76, 0.90, 0.46).lerp(base_color, clampf(window_mix * 0.72, 0.0, 1.0))
+			material.emission_enabled = true
+			material.emission = cool_color.lerp(base_color, clampf(0.44 + warm_hour * 0.42 + night * 0.18, 0.0, 1.0))
+			material.emission_energy_multiplier = lerpf(0.02, 0.12, daylight * 0.16 + blue_hour * 0.24) + window_mix * (0.22 + strength * 0.64)
+
+
+func _make_window_glow_material(base_color: Color, category: String, seed: int, strength: float = 1.0, occupied: float = 1.0) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.metallic = 0.04
+	material.roughness = 0.08
+	return _register_emissive_material(material, category, base_color, seed, strength, occupied)
+
+
+func _make_glow_pool_material(base_color: Color, category: String, seed: int, strength: float = 1.0) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.no_depth_test = false
+	material.roughness = 1.0
+	return _register_emissive_material(material, category, base_color, seed, strength, 1.0)
+
+
+func _window_fill_for_slot(is_mixed_use: bool, district: String, seed: int) -> float:
+	var base_ratio: float = mixed_use_window_fill_ratio if is_mixed_use else residential_window_fill_ratio
+	match district:
+		DISTRICT_CIVIC_CORE:
+			base_ratio += 0.08
+		DISTRICT_MARKET_SPINE:
+			base_ratio += 0.10
+		DISTRICT_GARDEN_QUARTER:
+			base_ratio -= 0.08
+		DISTRICT_HILLSIDE_QUARTER:
+			base_ratio -= 0.12
+	var roll: float = float(_positive_modulo(seed * 37 + 19, 100)) / 100.0
+	if roll > clampf(base_ratio, 0.08, 0.98):
+		return 0.18 + float(_positive_modulo(seed * 17 + 5, 20)) / 100.0
+	return 0.62 + float(_positive_modulo(seed * 13 + 7, 36)) / 100.0
+
+
+func _window_glow_for_house(district: String, venue_type: String = "") -> Color:
+	if venue_type != "":
+		return Color(VENUE_STYLE_PRESETS.get(venue_type, {}).get("window_glow", Color(1.0, 0.84, 0.66)))
+	match district:
+		DISTRICT_CIVIC_CORE:
+			return Color(0.98, 0.88, 0.72)
+		DISTRICT_MARKET_SPINE:
+			return Color(1.0, 0.82, 0.58)
+		DISTRICT_CULTURAL_CROSS:
+			return Color(0.92, 0.88, 1.0)
+		DISTRICT_GARDEN_QUARTER:
+			return Color(0.97, 0.86, 0.70)
+		_:
+			return Color(0.94, 0.82, 0.66)
 
 
 func _load_optional_packed_scene(asset_path: String) -> PackedScene:
@@ -344,6 +528,99 @@ func _create_roads() -> void:
 	for gx in range(grid_size.x):
 		for iz in range(grid_size.y + 1):
 			_create_horizontal_road(gx, iz, iz == _signature_cross_z)
+
+
+func _create_street_lamps() -> void:
+	if not enable_fake_street_lamps:
+		return
+	var seen: Dictionary = {}
+	var main_x_band: Vector2 = _road_band_x(_main_avenue_x)
+	var signature_z_band: Vector2 = _road_band_z(_signature_cross_z)
+	for gz in range(grid_size.y):
+		if gz % 2 != 0:
+			continue
+		var z_band: Vector2 = _block_band_z(gz)
+		var z: float = (z_band.x + z_band.y) * 0.5
+		_register_street_lamp_site(Vector3(main_x_band.x + street_width * 0.22, 0.0, z), seen)
+		_register_street_lamp_site(Vector3(main_x_band.y - street_width * 0.22, 0.0, z), seen)
+	for gx in range(grid_size.x):
+		if gx % 2 != 0:
+			continue
+		var x_band: Vector2 = _block_band_x(gx)
+		var x: float = (x_band.x + x_band.y) * 0.5
+		_register_street_lamp_site(Vector3(x, 0.0, signature_z_band.x + street_width * 0.22), seen)
+		_register_street_lamp_site(Vector3(x, 0.0, signature_z_band.y - street_width * 0.22), seen)
+	for slot in _building_slots:
+		var kind: String = str(slot.get("kind", ""))
+		if kind != "plaza" and kind != "civic_landmark":
+			continue
+		for raw_point in Array(slot.get("entry_points", [])):
+			var point: Vector3 = Vector3(raw_point)
+			var center: Vector3 = Vector3(slot.get("center", point))
+			var direction := Vector2(point.x - center.x, point.z - center.z)
+			if direction.length() < 0.05:
+				direction = Vector2(0.0, -1.0)
+			else:
+				direction = direction.normalized()
+			_register_street_lamp_site(Vector3(point.x + direction.x * 0.9, 0.0, point.z + direction.y * 0.9), seen)
+
+
+func _register_street_lamp_site(position: Vector3, seen: Dictionary) -> void:
+	var key: String = "%d|%d" % [int(round(position.x * 2.0)), int(round(position.z * 2.0))]
+	if seen.has(key):
+		return
+	seen[key] = true
+	_add_street_lamp(position)
+
+
+func _add_street_lamp(position: Vector3) -> void:
+	var snapped: Vector3 = get_nearest_walk_ground_point(position)
+	var pole_height: float = 3.6
+	var lamp_root := Node3D.new()
+	lamp_root.name = "StreetLamp_%d_%d" % [int(round(position.x * 10.0)), int(round(position.z * 10.0))]
+	lamp_root.position = Vector3(snapped.x, snapped.y, snapped.z)
+	_generated_root.add_child(lamp_root)
+
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.05
+	pole_mesh.bottom_radius = 0.06
+	pole_mesh.height = pole_height
+	pole.mesh = pole_mesh
+	pole.material_override = _lamp_post_material
+	pole.position = Vector3(0.0, pole_height * 0.5, 0.0)
+	lamp_root.add_child(pole)
+
+	var arm := MeshInstance3D.new()
+	var arm_mesh := BoxMesh.new()
+	arm_mesh.size = Vector3(0.14, 0.10, 0.68)
+	arm.mesh = arm_mesh
+	arm.material_override = _lamp_post_material
+	arm.position = Vector3(0.0, pole_height - 0.24, -0.28)
+	lamp_root.add_child(arm)
+
+	var bulb_color := Color(1.0, 0.88, 0.68)
+	var bulb_seed: int = abs(seed_value * 79 + int(round(position.x * 11.0)) * 13 + int(round(position.z * 11.0)) * 17)
+	var bulb := MeshInstance3D.new()
+	var bulb_mesh := SphereMesh.new()
+	bulb_mesh.radius = 0.12
+	bulb_mesh.height = 0.24
+	bulb.mesh = bulb_mesh
+	var bulb_material := _make_glow_pool_material(bulb_color, "lamp_bulb", bulb_seed, 1.0)
+	bulb.material_override = bulb_material
+	bulb.position = Vector3(0.0, pole_height - 0.34, -0.46)
+	lamp_root.add_child(bulb)
+
+	var pool := MeshInstance3D.new()
+	var pool_mesh := CylinderMesh.new()
+	pool_mesh.top_radius = 1.55
+	pool_mesh.bottom_radius = 1.35
+	pool_mesh.height = 0.03
+	pool.mesh = pool_mesh
+	pool.material_override = _make_glow_pool_material(Color(0.98, 0.84, 0.58), "lamp_pool", bulb_seed + 11, 1.0)
+	pool.position = Vector3(0.0, 0.035, -0.34)
+	pool.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	lamp_root.add_child(pool)
 
 func _create_intersection(ix: int, iz: int) -> void:
 	var x_band: Vector2 = _road_band_x(ix)
@@ -526,7 +803,11 @@ func _create_civic_plaza(x_band: Vector2, z_band: Vector2, block_top: float, gx:
 	var plaza_z := Vector2(z_band.x + inset, z_band.y - inset)
 	var plaza_top: float = block_top + 0.08
 	_add_prism_between(plaza_x, plaza_z, block_top, plaza_top, _road_material)
-	_register_walk_area(plaza_x, plaza_z, plaza_top)
+	var square_walk: Dictionary = _create_walkable_square_network(x_band, z_band, plaza_x, plaza_z, block_top, plaza_top)
+	var center_x: Vector2 = square_walk.get("center_x", Vector2(lerpf(plaza_x.x, plaza_x.y, 0.40), lerpf(plaza_x.x, plaza_x.y, 0.60)))
+	var center_z: Vector2 = square_walk.get("center_z", Vector2(lerpf(plaza_z.x, plaza_z.y, 0.40), lerpf(plaza_z.x, plaza_z.y, 0.60)))
+	var entry_points: Array = square_walk.get("entry_points", [])
+	var gathering_points: Array = square_walk.get("gathering_points", [])
 
 	var strip_depth: float = 0.72
 	_add_prism_between(Vector2(plaza_x.x, plaza_x.y), Vector2(plaza_z.x, plaza_z.x + strip_depth), plaza_top, plaza_top + 0.08, _house_trim_material)
@@ -545,8 +826,6 @@ func _create_civic_plaza(x_band: Vector2, z_band: Vector2, block_top: float, gx:
 	_add_planter_segment(Vector3(plaza_x.y - planter_thickness * 0.55, plaza_top + planter_height * 0.5, plaza_z.x + planter_length_z * 0.5), Vector3(planter_thickness, planter_height, planter_length_z), Vector3(1.0, 0.0, 0.0), 0.8)
 	_add_planter_segment(Vector3(plaza_x.y - planter_thickness * 0.55, plaza_top + planter_height * 0.5, plaza_z.y - planter_length_z * 0.5), Vector3(planter_thickness, planter_height, planter_length_z), Vector3(1.0, 0.0, 0.0), 0.8)
 
-	var center_x := Vector2(lerpf(plaza_x.x, plaza_x.y, 0.40), lerpf(plaza_x.x, plaza_x.y, 0.60))
-	var center_z := Vector2(lerpf(plaza_z.x, plaza_z.y, 0.40), lerpf(plaza_z.x, plaza_z.y, 0.60))
 	_add_prism_between(center_x, center_z, plaza_top, plaza_top + 0.34, _house_trim_material)
 	if _planter_bush_scene != null:
 		for corner in [
@@ -578,6 +857,8 @@ func _create_civic_plaza(x_band: Vector2, z_band: Vector2, block_top: float, gx:
 			"z_band": plaza_z,
 			"center": Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top, (plaza_z.x + plaza_z.y) * 0.5),
 			"entry": Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top, plaza_z.x + 0.95),
+			"entry_points": entry_points.duplicate(true),
+			"gathering_points": gathering_points.duplicate(true),
 			"top_y": plaza_top,
 			"roof_y": tower_top + 0.42,
 			"capacity": 18,
@@ -595,12 +876,65 @@ func _create_civic_plaza(x_band: Vector2, z_band: Vector2, block_top: float, gx:
 			"z_band": plaza_z,
 			"center": Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top, (plaza_z.x + plaza_z.y) * 0.5),
 			"entry": Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top, plaza_z.x + 0.95),
+			"entry_points": entry_points.duplicate(true),
+			"gathering_points": gathering_points.duplicate(true),
 			"top_y": plaza_top,
 			"roof_y": plaza_top + 0.34,
 			"capacity": 0,
 			"work_capacity": 0,
 			"label": "Plaza %d-%d" % [gx, gz]
 		})
+
+
+func _create_walkable_square_network(x_band: Vector2, z_band: Vector2, plaza_x: Vector2, plaza_z: Vector2, block_top: float, plaza_top: float) -> Dictionary:
+	var center_x := Vector2(lerpf(plaza_x.x, plaza_x.y, 0.40), lerpf(plaza_x.x, plaza_x.y, 0.60))
+	var center_z := Vector2(lerpf(plaza_z.x, plaza_z.y, 0.40), lerpf(plaza_z.x, plaza_z.y, 0.60))
+	var promenade_bands := [
+		{"x": _inset_band(plaza_x, 0.10), "z": _inset_band(Vector2(plaza_z.x, center_z.x), 0.10), "kind": "square"},
+		{"x": _inset_band(plaza_x, 0.10), "z": _inset_band(Vector2(center_z.y, plaza_z.y), 0.10), "kind": "square"},
+		{"x": _inset_band(Vector2(plaza_x.x, center_x.x), 0.10), "z": _inset_band(Vector2(center_z.x, center_z.y), 0.10), "kind": "square"},
+		{"x": _inset_band(Vector2(center_x.y, plaza_x.y), 0.10), "z": _inset_band(Vector2(center_z.x, center_z.y), 0.10), "kind": "square"}
+	]
+	for band in promenade_bands:
+		_register_walk_area(band["x"], band["z"], plaza_top, str(band.get("kind", "square")), 1.45)
+
+	var entry_half_span: float = minf(1.8, maxf(1.15, street_width * 0.34))
+	var north_entry_x := _inset_band(Vector2((plaza_x.x + plaza_x.y) * 0.5 - entry_half_span, (plaza_x.x + plaza_x.y) * 0.5 + entry_half_span), 0.04)
+	var south_entry_x := north_entry_x
+	var west_entry_z := _inset_band(Vector2((plaza_z.x + plaza_z.y) * 0.5 - entry_half_span, (plaza_z.x + plaza_z.y) * 0.5 + entry_half_span), 0.04)
+	var east_entry_z := west_entry_z
+	var north_entry_z := _inset_band(Vector2(z_band.x, plaza_z.x + 0.24), 0.04)
+	var south_entry_z := _inset_band(Vector2(plaza_z.y - 0.24, z_band.y), 0.04)
+	var west_entry_x := _inset_band(Vector2(x_band.x, plaza_x.x + 0.24), 0.04)
+	var east_entry_x := _inset_band(Vector2(plaza_x.y - 0.24, x_band.y), 0.04)
+	for apron in [
+		{"x": north_entry_x, "z": north_entry_z},
+		{"x": south_entry_x, "z": south_entry_z},
+		{"x": west_entry_x, "z": west_entry_z},
+		{"x": east_entry_x, "z": east_entry_z}
+	]:
+		_add_prism_between(apron["x"], apron["z"], block_top, plaza_top, _stair_material)
+		_register_walk_area(apron["x"], apron["z"], plaza_top, "square_entry", 1.2)
+
+	var entry_points: Array = [
+		Vector3((north_entry_x.x + north_entry_x.y) * 0.5, plaza_top, plaza_z.x + 0.34),
+		Vector3((south_entry_x.x + south_entry_x.y) * 0.5, plaza_top, plaza_z.y - 0.34),
+		Vector3(plaza_x.x + 0.34, plaza_top, (west_entry_z.x + west_entry_z.y) * 0.5),
+		Vector3(plaza_x.y - 0.34, plaza_top, (east_entry_z.x + east_entry_z.y) * 0.5)
+	]
+	var gathering_points: Array = [
+		Vector3((plaza_x.x + center_x.x) * 0.5, plaza_top, (plaza_z.x + center_z.x) * 0.5),
+		Vector3((center_x.y + plaza_x.y) * 0.5, plaza_top, (plaza_z.x + center_z.x) * 0.5),
+		Vector3((plaza_x.x + center_x.x) * 0.5, plaza_top, (center_z.y + plaza_z.y) * 0.5),
+		Vector3((center_x.y + plaza_x.y) * 0.5, plaza_top, (center_z.y + plaza_z.y) * 0.5)
+	]
+	return {
+		"center_x": center_x,
+		"center_z": center_z,
+		"entry_points": entry_points,
+		"gathering_points": gathering_points
+	}
+
 
 func _add_block_railings(x_band: Vector2, z_band: Vector2, block_top: float, gx: int, gz: int) -> void:
 	for section in _edge_flat_road_sections("north", gx, gz):
@@ -946,7 +1280,6 @@ func _create_house_mass(x_band: Vector2, z_band: Vector2, block_top: float, gx: 
 
 	var bay_x: Vector2 = Vector2(lerpf(x_band.x, x_band.y, 0.28), lerpf(x_band.x, x_band.y, 0.72))
 	var bay_z: Vector2 = Vector2(z_band.x - 0.22, z_band.x + 0.42)
-	_add_prism_between(bay_x, bay_z, block_top + basement_height + 0.55, minf(top_y - 0.3, block_top + basement_height + 4.8), _window_material)
 	if district == DISTRICT_MARKET_SPINE or district == DISTRICT_CULTURAL_CROSS:
 		var awning_y: float = block_top + minf(1.55, basement_height * 0.88)
 		_add_prism_between(Vector2(lerpf(x_band.x, x_band.y, 0.18), lerpf(x_band.x, x_band.y, 0.82)), Vector2(z_band.x - 0.42, z_band.x + 0.16), awning_y, awning_y + 0.16, _house_body_materials[(material_index + 1) % _house_body_materials.size()])
@@ -964,6 +1297,10 @@ func _create_house_mass(x_band: Vector2, z_band: Vector2, block_top: float, gx: 
 		venue_type = _venue_type_for_house(district, gx, gz, index)
 		if venue_type != "":
 			_add_storefront_signage(x_band, z_band, block_top, venue_type, material_index)
+	var building_seed: int = abs(seed_value * 101 + gx * 31 + gz * 47 + index * 13)
+	var window_fill: float = _window_fill_for_slot(slot_kind == "mixed_use", district, building_seed)
+	var bay_material := _make_window_glow_material(_window_glow_for_house(district, venue_type), "house_window", building_seed, 0.74 + float(floors) * 0.05, window_fill)
+	_add_prism_between(bay_x, bay_z, block_top + basement_height + 0.55, minf(top_y - 0.3, block_top + basement_height + 4.8), bay_material)
 	_register_building_slot({
 		"id": "house_%d_%d_%d" % [gx, gz, index],
 		"kind": slot_kind,
@@ -1038,11 +1375,9 @@ func _add_storefront_signage(x_band: Vector2, z_band: Vector2, block_top: float,
 		stripe.position = awning_center + Vector3(0.0, 0.045 - stripe_index * 0.045, -0.18 + stripe_index * 0.18)
 		_generated_root.add_child(stripe)
 
-	var glow_material := StandardMaterial3D.new()
-	glow_material.albedo_color = Color(style.get("window_glow", Color(0.98, 0.90, 0.78)))
-	glow_material.emission_enabled = true
-	glow_material.emission = glow_material.albedo_color
-	glow_material.emission_energy_multiplier = 0.5
+	var glow_color: Color = Color(style.get("window_glow", Color(0.98, 0.90, 0.78)))
+	var glow_seed: int = abs(seed_value * 59 + int(round(x_band.x * 10.0)) * 7 + int(round(z_band.x * 10.0)) * 13 + material_index * 17)
+	var glow_material := _make_window_glow_material(glow_color, "storefront_window", glow_seed, 1.1, 1.0)
 	glow_material.roughness = 0.18
 	var display := MeshInstance3D.new()
 	var display_mesh := BoxMesh.new()
@@ -1051,6 +1386,8 @@ func _add_storefront_signage(x_band: Vector2, z_band: Vector2, block_top: float,
 	display.material_override = glow_material
 	display.position = Vector3((x_band.x + x_band.y) * 0.5, block_top + 1.0, z_band.x - 0.03)
 	_generated_root.add_child(display)
+	_add_storefront_light_pool(x_band, z_band, block_top, glow_color, glow_seed)
+	_add_storefront_mood_lighting(x_band, z_band, block_top, venue_type, glow_seed)
 
 	_add_storefront_decor(x_band, z_band, block_top, venue_type)
 
@@ -1074,6 +1411,74 @@ func _add_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: float, v
 		"bread":
 			_add_bakery_storefront_decor(x_band, z_band, block_top)
 
+
+func _add_storefront_light_pool(x_band: Vector2, z_band: Vector2, block_top: float, glow_color: Color, seed: int) -> void:
+	var pool := MeshInstance3D.new()
+	var pool_mesh := BoxMesh.new()
+	pool_mesh.size = Vector3(maxf(1.4, (x_band.y - x_band.x) * 0.72), 0.02, 1.45)
+	pool.mesh = pool_mesh
+	pool.material_override = _make_glow_pool_material(glow_color, "storefront_pool", seed, 1.0)
+	pool.position = Vector3((x_band.x + x_band.y) * 0.5, block_top + 0.03, z_band.x - 0.30)
+	_generated_root.add_child(pool)
+
+
+func _add_storefront_mood_lighting(x_band: Vector2, z_band: Vector2, block_top: float, venue_type: String, seed: int) -> void:
+	var style: Dictionary = VENUE_STYLE_PRESETS.get(venue_type, {})
+	var lamp_color: Color = Color(style.get("lamp_glow", style.get("window_glow", Color(1.0, 0.84, 0.70))))
+	var width: float = maxf(1.4, (x_band.y - x_band.x) * 0.68)
+	for lamp_index in range(2):
+		var offset_x: float = -width * 0.24 if lamp_index == 0 else width * 0.24
+		var pendant := MeshInstance3D.new()
+		var pendant_mesh := SphereMesh.new()
+		pendant_mesh.radius = 0.09
+		pendant_mesh.height = 0.18
+		pendant.mesh = pendant_mesh
+		pendant.material_override = _make_glow_pool_material(lamp_color, "lamp_bulb", seed + lamp_index * 17, 0.82)
+		pendant.position = Vector3((x_band.x + x_band.y) * 0.5 + offset_x, block_top + 1.86, z_band.x + 0.06)
+		_generated_root.add_child(pendant)
+		var cord := MeshInstance3D.new()
+		var cord_mesh := CylinderMesh.new()
+		cord_mesh.top_radius = 0.01
+		cord_mesh.bottom_radius = 0.01
+		cord_mesh.height = 0.52
+		cord.mesh = cord_mesh
+		cord.material_override = _track_material
+		cord.position = pendant.position + Vector3(0.0, 0.24, 0.0)
+		_generated_root.add_child(cord)
+	var bench := MeshInstance3D.new()
+	var bench_mesh := BoxMesh.new()
+	bench_mesh.size = Vector3(width * 0.58, 0.12, 0.28)
+	bench.mesh = bench_mesh
+	bench.material_override = _planter_material
+	bench.position = Vector3((x_band.x + x_band.y) * 0.5, block_top + 0.46, z_band.x - 0.54)
+	_generated_root.add_child(bench)
+	_add_storefront_planters(x_band, z_band, block_top, venue_type)
+
+
+func _add_storefront_planters(x_band: Vector2, z_band: Vector2, block_top: float, venue_type: String) -> void:
+	var style: Dictionary = VENUE_STYLE_PRESETS.get(venue_type, {})
+	var planter_color: Color = Color(style.get("planter_color", Color(0.36, 0.40, 0.28)))
+	for offset in [-0.54, 0.54]:
+		var planter_material := StandardMaterial3D.new()
+		planter_material.albedo_color = planter_color
+		planter_material.roughness = 0.88
+		var planter := MeshInstance3D.new()
+		var planter_mesh := BoxMesh.new()
+		planter_mesh.size = Vector3(0.26, 0.26, 0.26)
+		planter.mesh = planter_mesh
+		planter.material_override = planter_material
+		planter.position = Vector3((x_band.x + x_band.y) * 0.5 + offset, block_top + 0.18, z_band.x - 0.42)
+		_generated_root.add_child(planter)
+		var shrub := MeshInstance3D.new()
+		var shrub_mesh := SphereMesh.new()
+		shrub_mesh.radius = 0.17
+		shrub_mesh.height = 0.34
+		shrub.mesh = shrub_mesh
+		shrub.material_override = _foliage_material
+		shrub.position = planter.position + Vector3(0.0, 0.24, 0.0)
+		_generated_root.add_child(shrub)
+
+
 func _add_cafe_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: float) -> void:
 	for offset in [-0.32, 0.32]:
 		var table_top := MeshInstance3D.new()
@@ -1094,6 +1499,21 @@ func _add_cafe_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: flo
 		table_base.material_override = _track_material
 		table_base.position = Vector3((x_band.x + x_band.y) * 0.5 + offset, block_top + 0.46, z_band.x - 0.42)
 		_generated_root.add_child(table_base)
+		for chair_offset in [-0.16, 0.16]:
+			var chair := MeshInstance3D.new()
+			var chair_mesh := BoxMesh.new()
+			chair_mesh.size = Vector3(0.12, 0.34, 0.12)
+			chair.mesh = chair_mesh
+			chair.material_override = _house_trim_material
+			chair.position = Vector3((x_band.x + x_band.y) * 0.5 + offset + chair_offset, block_top + 0.33, z_band.x - 0.70)
+			_generated_root.add_child(chair)
+	var steam_strip := MeshInstance3D.new()
+	var steam_mesh := BoxMesh.new()
+	steam_mesh.size = Vector3(maxf(0.9, (x_band.y - x_band.x) * 0.44), 0.04, 0.24)
+	steam_strip.mesh = steam_mesh
+	steam_strip.material_override = _make_glow_pool_material(Color(1.0, 0.74, 0.50), "storefront_pool", int(abs(x_band.x * 19.0 + z_band.x * 13.0 + seed_value * 23)), 0.66)
+	steam_strip.position = Vector3((x_band.x + x_band.y) * 0.5, block_top + 1.16, z_band.x + 0.10)
+	_generated_root.add_child(steam_strip)
 
 func _add_bookstore_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: float) -> void:
 	for offset in [-0.42, 0.42]:
@@ -1112,6 +1532,21 @@ func _add_bookstore_storefront_decor(x_band: Vector2, z_band: Vector2, block_top
 			book.material_override = _house_body_materials[(row + int(offset > 0.0)) % _house_body_materials.size()]
 			book.position = shelf.position + Vector3(0.0, -0.36 + row * 0.24, 0.0)
 			_generated_root.add_child(book)
+	var crate := MeshInstance3D.new()
+	var crate_mesh := BoxMesh.new()
+	crate_mesh.size = Vector3(0.56, 0.22, 0.30)
+	crate.mesh = crate_mesh
+	crate.material_override = _planter_material
+	crate.position = Vector3((x_band.x + x_band.y) * 0.5, block_top + 0.16, z_band.x - 0.14)
+	_generated_root.add_child(crate)
+	for stack_index in range(3):
+		var stack := MeshInstance3D.new()
+		var stack_mesh := BoxMesh.new()
+		stack_mesh.size = Vector3(0.14, 0.05, 0.18)
+		stack.mesh = stack_mesh
+		stack.material_override = _house_body_materials[(stack_index + 1) % _house_body_materials.size()]
+		stack.position = crate.position + Vector3(-0.16 + stack_index * 0.16, 0.15 + stack_index * 0.03, 0.0)
+		_generated_root.add_child(stack)
 
 func _add_bakery_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: float) -> void:
 	for offset in [-0.30, 0.30]:
@@ -1122,6 +1557,25 @@ func _add_bakery_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: f
 		basket.material_override = _planter_material
 		basket.position = Vector3((x_band.x + x_band.y) * 0.5 + offset, block_top + 0.82, z_band.x - 0.10)
 		_generated_root.add_child(basket)
+		var loaf_material := StandardMaterial3D.new()
+		loaf_material.albedo_color = Color(0.90, 0.68, 0.34)
+		loaf_material.roughness = 0.76
+		for loaf_index in range(2):
+			var loaf := MeshInstance3D.new()
+			var loaf_mesh := SphereMesh.new()
+			loaf_mesh.radius = 0.08
+			loaf_mesh.height = 0.12
+			loaf.mesh = loaf_mesh
+			loaf.material_override = loaf_material
+			loaf.position = basket.position + Vector3(-0.05 + loaf_index * 0.10, 0.09, 0.0)
+			_generated_root.add_child(loaf)
+	var warm_strip := MeshInstance3D.new()
+	var warm_strip_mesh := BoxMesh.new()
+	warm_strip_mesh.size = Vector3(maxf(0.9, (x_band.y - x_band.x) * 0.52), 0.03, 0.16)
+	warm_strip.mesh = warm_strip_mesh
+	warm_strip.material_override = _make_glow_pool_material(Color(1.0, 0.78, 0.56), "storefront_pool", int(abs(x_band.y * 17.0 + z_band.y * 11.0 + seed_value * 29)), 0.58)
+	warm_strip.position = Vector3((x_band.x + x_band.y) * 0.5, block_top + 1.02, z_band.x + 0.08)
+	_generated_root.add_child(warm_strip)
 
 
 func _add_flower_box_row(x_band: Vector2, z_band: Vector2, height_y: float) -> void:
@@ -1206,19 +1660,42 @@ func _edge_flat_road_sections(side: String, gx: int, gz: int) -> Array:
 			})
 	return sections_out
 
-func _register_walk_area(x_band: Vector2, z_band: Vector2, top_y: float) -> void:
-	_walk_areas.append({"x": x_band, "z": z_band, "y": top_y})
+func _register_walk_area(x_band: Vector2, z_band: Vector2, top_y: float, kind: String = "road", weight: float = 1.0) -> void:
+	var area_size: float = maxf(0.01, (x_band.y - x_band.x) * (z_band.y - z_band.x))
+	_walk_areas.append({
+		"x": x_band,
+		"z": z_band,
+		"y": top_y,
+		"kind": kind,
+		"weight": maxf(0.01, weight),
+		"area": area_size
+	})
 
 func get_spawn_point() -> Vector3:
 	var start_node := Vector2i(_main_avenue_x, maxi(1, int(grid_size.y * 0.28)))
 	var point := _node_position(start_node.x, start_node.y)
 	return Vector3(point.x, point.y + road_surface_thickness + 1.65, point.z)
 
-func get_random_walk_point(margin: float = 0.45) -> Vector3:
+func get_random_walk_point(margin: float = 0.45, preferred_kind: String = "") -> Vector3:
 	if _walk_areas.is_empty():
 		var spawn := get_spawn_point()
 		return Vector3(spawn.x, spawn.y - 1.65, spawn.z)
-	var area: Dictionary = _walk_areas[_rng.randi_range(0, _walk_areas.size() - 1)]
+	var candidates: Array = []
+	for area in _walk_areas:
+		if preferred_kind == "" or String(area.get("kind", "")) == preferred_kind:
+			candidates.append(area)
+	if candidates.is_empty():
+		candidates = _walk_areas
+	var total_weight: float = 0.0
+	for candidate in candidates:
+		total_weight += float(candidate.get("weight", 1.0)) * float(candidate.get("area", 1.0))
+	var pick_weight: float = _rng.randf() * maxf(0.001, total_weight)
+	var area: Dictionary = candidates[0]
+	for candidate in candidates:
+		pick_weight -= float(candidate.get("weight", 1.0)) * float(candidate.get("area", 1.0))
+		area = candidate
+		if pick_weight <= 0.0:
+			break
 	var x0: float = float(area["x"].x)
 	var x1: float = float(area["x"].y)
 	var z0: float = float(area["z"].x)

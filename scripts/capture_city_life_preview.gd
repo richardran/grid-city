@@ -44,6 +44,7 @@ func _run() -> void:
 	await _capture_view(population, camera, atmosphere, Vector3(venue_slot.get("entry", Vector3.ZERO)), 6.3, "city_life_sunrise.png")
 	await _capture_view(population, camera, atmosphere, Vector3(plaza_slot.get("entry", plaza_slot.get("center", Vector3.ZERO))), 18.55, "city_life_sunset.png")
 	await _capture_view(population, camera, atmosphere, Vector3(plaza_slot.get("entry", plaza_slot.get("center", Vector3.ZERO))), 19.35, "city_life_blue_hour_moon.png")
+	await _capture_view(population, camera, atmosphere, Vector3(venue_slot.get("entry", venue_slot.get("center", Vector3.ZERO))), 21.2, "city_life_night_lamps.png")
 	quit(0)
 
 
@@ -63,7 +64,7 @@ func _capture_view(population: Node, camera: Camera3D, atmosphere: Node, focus: 
 	camera.rotation.x = -0.30
 	for _step in range(3):
 		await process_frame
-	_save_viewport_png(filename)
+	await _save_viewport_png(filename)
 
 
 func _save_viewport_png(filename: String) -> void:

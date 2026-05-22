@@ -55,12 +55,17 @@ func _init() -> void:
 	assert(snapshot_before[0].has("position"))
 	assert(snapshot_before[0].has("target"))
 	assert(snapshot_before[0].has("mode"))
+	assert(snapshot_before[0].has("group_kind"))
 	assert(snapshot_before[0].has("identity"))
 	assert(not Dictionary(snapshot_before[0]["identity"]).is_empty())
 	var dog_count: int = 0
+	var grouped_people: int = 0
 	for entry in snapshot_before:
 		if String(entry.get("type", "")) == "dog":
 			dog_count += 1
+		elif String(entry.get("group_kind", "solo")) != "solo":
+			grouped_people += 1
+	assert(grouped_people > 0)
 	assert(dog_count >= 2)
 	assert(dog_count <= 3)
 	var tracked_identity: Dictionary = snapshot_before[0]["identity"]

@@ -44,6 +44,10 @@ const PERSON_COLORS := {
 @export var house_event_roadside_offset: float = 2.2
 @export var world_event_ground_lift: float = 0.16
 @export var world_event_persistence_days: float = 90.0
+@export_range(0.0, 1.0, 0.05) var social_group_share: float = 0.78
+@export_range(0.55, 1.8, 0.05) var social_group_spacing: float = 0.92
+@export_range(2, 5, 1) var max_social_group_members: int = 4
+@export_range(0.0, 1.0, 0.05) var dog_group_follow_share: float = 0.72
 
 var _city: Node
 var _population: Node
@@ -57,6 +61,11 @@ var _active_event_effects: Array[Dictionary] = []
 var _frame_counter: int = 0
 var _optional_scene_cache: Dictionary = {}
 var _missing_optional_assets: Dictionary = {}
+var _social_groups: Dictionary = {}
+var _person_group_assignments: Dictionary = {}
+var _group_leader_indices_by_person: Dictionary = {}
+var _group_leader_indices_by_group: Dictionary = {}
+var _dog_group_assignments: Array = []
 
 
 func _ready() -> void:
@@ -68,6 +77,11 @@ func _ready() -> void:
 func clear_pedestrians() -> void:
 	_pedestrians.clear()
 	_active_event_effects.clear()
+	_social_groups.clear()
+	_person_group_assignments.clear()
+	_group_leader_indices_by_person.clear()
+	_group_leader_indices_by_group.clear()
+	_dog_group_assignments.clear()
 	for child in get_children():
 		child.queue_free()
 
@@ -84,12 +98,17 @@ func populate_now() -> void:
 	_rng.seed = int(abs(city_seed * 19349663 + 907633515))
 	var target_count: int = _target_count()
 	var residents: Array = _compose_resident_identities(target_count)
+	_rebuild_social_group_state(residents)
 	for index in range(target_count):
 		var identity: Dictionary = residents[index] if index < residents.size() else {}
-		_spawn_pedestrian(index, identity)
+		var group_info: Dictionary = _group_assignment_for_identity(identity)
+		_spawn_pedestrian(index, identity, group_info)
 	var dog_count: int = _target_dog_count()
+	_dog_group_assignments = _plan_dog_social_assignments(dog_count)
 	for dog_index in range(dog_count):
-		_spawn_dog(target_count + dog_index)
+		var dog_group: Dictionary = _dog_group_assignments[dog_index] if dog_index < _dog_group_assignments.size() else {}
+		_spawn_dog(target_count + dog_index, dog_group)
+	_rebuild_group_leader_indices()
 
 
 func get_pedestrian_count() -> int:
@@ -113,6 +132,8 @@ func get_pedestrian_debug_snapshot() -> Array:
 			"position": ped["root"].position,
 			"target": ped["target"],
 			"mode": str(ped.get("mode", "wander")),
+			"group_kind": str(ped.get("group_kind", "solo")),
+			"group_id": str(ped.get("group_id", "")),
 			"speed": ped["speed"],
 			"color": PERSON_COLORS.get(actor_type, Color.WHITE),
 			"identity": identity,
@@ -167,6 +188,12 @@ func _process(delta: float) -> void:
 			_pedestrians[index] = ped
 			continue
 		var pause_time: float = float(ped["pause_time"])
+		var social_target: Variant = _group_follow_target(ped, root.position)
+		if social_target != null:
+			ped["target"] = social_target
+			ped["pause_time"] = 0.0
+			ped["speed"] = _group_speed_for_actor(ped)
+			pause_time = 0.0
 		if pause_time > 0.0:
 			pause_time = maxf(0.0, pause_time - delta)
 			ped["pause_time"] = pause_time
@@ -179,6 +206,14 @@ func _process(delta: float) -> void:
 		var toward := Vector3(target.x - position.x, 0.0, target.z - position.z)
 		var distance: float = toward.length()
 		if distance < 0.45 or float(ped["stuck_time"]) > 1.0:
+			var group_target: Variant = _group_follow_target(ped, position)
+			if group_target != null:
+				ped["target"] = group_target
+				ped["speed"] = _group_speed_for_actor(ped)
+				ped["stuck_time"] = 0.0
+				ped["pause_time"] = 0.0
+				_pedestrians[index] = ped
+				continue
 			var activity: Dictionary = _activity_for_identity(identity)
 			var mode: String = str(activity.get("mode", ped.get("mode", "wander")))
 			ped["mode"] = mode
@@ -252,22 +287,24 @@ func refresh_identities_from_population() -> void:
 		if str(_pedestrians[index].get("type", "person")) != DOG_TYPE:
 			resident_slots.append(index)
 	var residents: Array = _compose_resident_identities(resident_slots.size())
+	_rebuild_social_group_state(residents)
+	_dog_group_assignments = _plan_dog_social_assignments(_dog_count())
+	var resident_cursor: int = 0
+	var dog_cursor: int = 0
 	for index in range(_pedestrians.size()):
 		var ped: Dictionary = _pedestrians[index]
 		if not is_instance_valid(ped["root"]):
 			continue
 		if str(ped.get("type", "person")) == DOG_TYPE:
-			ped["identity"] = {}
+			ped = _refresh_dog_social_state(ped, dog_cursor)
+			dog_cursor += 1
 			_pedestrians[index] = ped
 			continue
-		var resident_index: int = resident_slots.find(index)
-		var identity: Dictionary = residents[resident_index] if resident_index != -1 and resident_index < residents.size() else {}
-		ped["identity"] = identity
-		ped["root"].set_meta("identity", identity)
-		var display_name: String = str(identity.get("full_name", "Pedestrian"))
-		ped["root"].name = "Pedestrian_%02d_%s_%s" % [index, String(ped.get("type", "person")), display_name.replace(" ", "_")]
-		_refresh_identity_label(ped["root"], identity)
+		var identity: Dictionary = residents[resident_cursor] if resident_cursor < residents.size() else {}
+		resident_cursor += 1
+		ped = _apply_identity_to_pedestrian(ped, index, identity)
 		_pedestrians[index] = ped
+	_rebuild_group_leader_indices()
 
 
 func set_tracked_people(person_ids: Array) -> void:
@@ -326,6 +363,14 @@ func _target_dog_count() -> int:
 	return clampi(ideal + jitter, min_dogs, max_dogs)
 
 
+func _dog_count() -> int:
+	var count: int = 0
+	for ped in _pedestrians:
+		if str(ped.get("type", "person")) == DOG_TYPE:
+			count += 1
+	return count
+
+
 func _compose_resident_identities(target_count: int) -> Array:
 	var residents: Array = []
 	if _population == null or target_count <= 0:
@@ -351,10 +396,316 @@ func _compose_resident_identities(target_count: int) -> Array:
 				continue
 			seen[person_id] = true
 			residents.append(candidate)
+			_append_social_companions(candidate, residents, seen, target_count)
 	return residents.slice(0, mini(target_count, residents.size()))
 
 
-func _spawn_pedestrian(index: int, identity: Dictionary = {}) -> void:
+func _append_social_companions(identity: Dictionary, residents: Array, seen: Dictionary, target_count: int) -> void:
+	if _population == null or residents.size() >= target_count or identity.is_empty():
+		return
+	var companion_ids: Array[int] = []
+	var spouse_id: int = int(identity.get("spouse_id", -1))
+	if spouse_id > 0:
+		companion_ids.append(spouse_id)
+	var household_id: int = int(identity.get("household_id", -1))
+	if household_id > 0 and _population.has_method("get_household"):
+		var household: Dictionary = _population.call("get_household", household_id)
+		for member_id in Array(household.get("member_ids", [])):
+			var resolved_member_id: int = int(member_id)
+			if resolved_member_id > 0 and resolved_member_id != int(identity.get("id", -1)) and not companion_ids.has(resolved_member_id):
+				companion_ids.append(resolved_member_id)
+	if _population.has_method("get_social_bonds"):
+		for bond in _population.call("get_social_bonds", int(identity.get("id", -1)), 3):
+			var target_id: int = int(bond.get("target_id", -1))
+			if target_id > 0 and int(bond.get("score", 0)) >= 24 and not companion_ids.has(target_id):
+				companion_ids.append(target_id)
+	for companion_id in companion_ids:
+		if residents.size() >= target_count or seen.has(companion_id):
+			continue
+		if not _population.has_method("get_person"):
+			break
+		var companion: Dictionary = _population.call("get_person", companion_id)
+		if companion.is_empty() or not bool(companion.get("alive", true)):
+			continue
+		seen[companion_id] = true
+		residents.append(companion)
+
+
+func _rebuild_social_group_state(residents: Array) -> void:
+	var social_plan: Dictionary = _plan_social_groups(residents)
+	_social_groups = Dictionary(social_plan.get("groups", {}))
+	_person_group_assignments = Dictionary(social_plan.get("assignments", {}))
+
+
+func _apply_identity_to_pedestrian(ped: Dictionary, index: int, identity: Dictionary) -> Dictionary:
+	var group_info: Dictionary = _group_assignment_for_identity(identity)
+	ped["identity"] = identity
+	ped["root"].set_meta("identity", identity)
+	ped["group_id"] = str(group_info.get("id", ""))
+	ped["group_kind"] = str(group_info.get("kind", "solo"))
+	ped["group_role"] = str(group_info.get("role", "solo"))
+	ped["leader_person_id"] = int(group_info.get("leader_id", int(identity.get("id", -1))))
+	ped["group_offset"] = Vector3(group_info.get("offset", Vector3.ZERO))
+	var display_name: String = str(identity.get("full_name", "Pedestrian"))
+	ped["root"].name = "Pedestrian_%02d_%s_%s" % [index, String(ped.get("type", "person")), display_name.replace(" ", "_")]
+	_refresh_identity_label(ped["root"], identity)
+	return ped
+
+
+func _rebuild_group_leader_indices() -> void:
+	_group_leader_indices_by_person.clear()
+	_group_leader_indices_by_group.clear()
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
+		if str(ped.get("group_role", "solo")) != "leader":
+			continue
+		var identity: Dictionary = ped.get("identity", {})
+		if not identity.is_empty():
+			_group_leader_indices_by_person[int(identity.get("id", -1))] = index
+		var group_id: String = str(ped.get("group_id", ""))
+		if group_id != "":
+			_group_leader_indices_by_group[group_id] = index
+
+
+func _refresh_dog_social_state(ped: Dictionary, dog_index: int) -> Dictionary:
+	ped["identity"] = {}
+	var group_info: Dictionary = _dog_group_assignments[dog_index] if dog_index < _dog_group_assignments.size() else {}
+	ped["group_id"] = str(group_info.get("group_id", ""))
+	ped["group_kind"] = str(group_info.get("group_kind", "solo"))
+	ped["group_role"] = "dog" if not group_info.is_empty() else "solo"
+	ped["leader_person_id"] = int(group_info.get("leader_id", -1))
+	ped["group_offset"] = Vector3(group_info.get("offset", Vector3.ZERO))
+	return ped
+
+
+func _group_assignment_for_identity(identity: Dictionary) -> Dictionary:
+	if identity.is_empty():
+		return {}
+	return Dictionary(_person_group_assignments.get(int(identity.get("id", -1)), {}))
+
+
+func _plan_social_groups(residents: Array) -> Dictionary:
+	var groups: Dictionary = {}
+	var assignments: Dictionary = {}
+	if residents.is_empty() or _population == null:
+		return {"groups": groups, "assignments": assignments}
+	var eligible_count: int = int(round(float(residents.size()) * social_group_share))
+	var activity_by_id: Dictionary = {}
+	var selected_by_id: Dictionary = {}
+	var used: Dictionary = {}
+	for identity in residents:
+		var person_id: int = int(identity.get("id", -1))
+		if person_id <= 0:
+			continue
+		selected_by_id[person_id] = identity
+		activity_by_id[person_id] = _activity_for_identity(identity)
+	var group_index: int = 0
+	var household_members: Dictionary = {}
+	for identity in residents:
+		var person_id: int = int(identity.get("id", -1))
+		var household_id: int = int(identity.get("household_id", -1))
+		if person_id <= 0 or household_id <= 0:
+			continue
+		if not _allows_family_group_mode(_mode_for_activity(activity_by_id.get(person_id, {}))):
+			continue
+		if not household_members.has(household_id):
+			household_members[household_id] = []
+		Array(household_members[household_id]).append(identity)
+	for household_id in household_members.keys():
+		var members: Array = Array(household_members[household_id])
+		if members.size() < 2 or used.size() >= eligible_count:
+			continue
+		members.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			var a_age: int = int(a.get("age", 30))
+			var b_age: int = int(b.get("age", 30))
+			if (a_age < 18) != (b_age < 18):
+				return a_age >= 18
+			return a_age > b_age
+		)
+		var family_members: Array = []
+		for member in members:
+			var member_id: int = int(member.get("id", -1))
+			if used.has(member_id):
+				continue
+			family_members.append(member)
+			if family_members.size() >= max_social_group_members:
+				break
+		if family_members.size() >= 2:
+			group_index = _register_social_group(groups, assignments, used, group_index, "family", family_members, _select_group_leader(family_members), activity_by_id)
+
+	for identity in residents:
+		if used.size() >= eligible_count:
+			break
+		var person_id: int = int(identity.get("id", -1))
+		var spouse_id: int = int(identity.get("spouse_id", -1))
+		if person_id <= 0 or spouse_id <= 0 or used.has(person_id) or used.has(spouse_id):
+			continue
+		if not selected_by_id.has(spouse_id):
+			continue
+		var spouse: Dictionary = Dictionary(selected_by_id.get(spouse_id, {}))
+		if spouse.is_empty() or not _activities_can_share_group(activity_by_id.get(person_id, {}), activity_by_id.get(spouse_id, {})):
+			continue
+		group_index = _register_social_group(groups, assignments, used, group_index, "lovers", [identity, spouse], person_id, activity_by_id)
+
+	for identity in residents:
+		if used.size() >= eligible_count:
+			break
+		var person_id: int = int(identity.get("id", -1))
+		if person_id <= 0 or used.has(person_id):
+			continue
+		var friend_members: Array = [identity]
+		if _population.has_method("get_social_bonds"):
+			for bond in _population.call("get_social_bonds", person_id, 4):
+				var target_id: int = int(bond.get("target_id", -1))
+				if target_id <= 0 or used.has(target_id) or not selected_by_id.has(target_id):
+					continue
+				if int(bond.get("score", 0)) < 26:
+					continue
+				var friend: Dictionary = Dictionary(selected_by_id.get(target_id, {}))
+				if friend.is_empty() or not _activities_can_share_group(activity_by_id.get(person_id, {}), activity_by_id.get(target_id, {})):
+					continue
+				friend_members.append(friend)
+				if friend_members.size() >= mini(3, max_social_group_members):
+					break
+		if friend_members.size() >= 2:
+			group_index = _register_social_group(groups, assignments, used, group_index, "friends", friend_members, person_id, activity_by_id)
+
+	return {"groups": groups, "assignments": assignments}
+
+
+func _register_social_group(groups: Dictionary, assignments: Dictionary, used: Dictionary, group_index: int, group_kind: String, members: Array, leader_id: int, activity_by_id: Dictionary) -> int:
+	var filtered: Array = []
+	for member in members:
+		var member_id: int = int(member.get("id", -1))
+		if member_id <= 0 or used.has(member_id):
+			continue
+		filtered.append(member)
+	if filtered.size() < 2:
+		return group_index
+	group_index += 1
+	var group_id: String = "%s_%02d" % [group_kind, group_index]
+	var ordered: Array = []
+	var leader_identity: Dictionary = {}
+	for member in filtered:
+		if int(member.get("id", -1)) == leader_id:
+			leader_identity = member
+			break
+	if leader_identity.is_empty():
+		leader_identity = filtered[0]
+	ordered.append(leader_identity)
+	for member in filtered:
+		if int(member.get("id", -1)) != int(leader_identity.get("id", -1)):
+			ordered.append(member)
+	var formation: Array = _group_offsets_for_kind(group_kind, ordered.size())
+	var anchor: Vector3 = _spawn_position_for_identity(leader_identity)
+	var member_ids: Array = []
+	groups[group_id] = {
+		"id": group_id,
+		"kind": group_kind,
+		"leader_id": int(leader_identity.get("id", -1)),
+		"member_ids": member_ids,
+		"anchor": anchor,
+		"mode": _mode_for_activity(activity_by_id.get(int(leader_identity.get("id", -1)), {}))
+	}
+	for member_index in range(ordered.size()):
+		var member: Dictionary = ordered[member_index]
+		var member_id: int = int(member.get("id", -1))
+		used[member_id] = true
+		member_ids.append(member_id)
+		assignments[member_id] = {
+			"id": group_id,
+			"kind": group_kind,
+			"leader_id": int(leader_identity.get("id", -1)),
+			"role": "leader" if member_index == 0 else "member",
+			"offset": formation[member_index] if member_index < formation.size() else Vector3.ZERO,
+			"anchor": anchor
+		}
+	return group_index
+
+
+func _select_group_leader(members: Array) -> int:
+	var best_id: int = int(Dictionary(members[0]).get("id", -1)) if not members.is_empty() else -1
+	var best_score: float = -INF
+	for member in members:
+		var identity: Dictionary = member
+		var age: int = int(identity.get("age", 30))
+		var score: float = float(age)
+		if age >= 18:
+			score += 120.0
+		if int(identity.get("spouse_id", -1)) > 0:
+			score += 18.0
+		if score > best_score:
+			best_score = score
+			best_id = int(identity.get("id", -1))
+	return best_id
+
+
+func _mode_for_activity(activity: Dictionary) -> String:
+	return str(activity.get("mode", "wander"))
+
+
+func _allows_family_group_mode(mode: String) -> bool:
+	return ["home", "wander", "market", "plaza", "evening_stroll"].has(mode)
+
+
+func _activities_can_share_group(activity_a: Dictionary, activity_b: Dictionary) -> bool:
+	var mode_a: String = _mode_for_activity(activity_a)
+	var mode_b: String = _mode_for_activity(activity_b)
+	if mode_a == mode_b:
+		return true
+	var relaxed_modes := ["home", "wander", "market", "plaza", "evening_stroll"]
+	return relaxed_modes.has(mode_a) and relaxed_modes.has(mode_b)
+
+
+func _group_offsets_for_kind(group_kind: String, member_count: int) -> Array:
+	var spacing: float = social_group_spacing
+	match group_kind:
+		"lovers":
+			return [
+				Vector3.ZERO,
+				Vector3(0.42 * spacing, 0.0, -0.28 * spacing)
+			].slice(0, member_count)
+		"friends":
+			return [
+				Vector3.ZERO,
+				Vector3(0.72 * spacing, 0.0, -0.30 * spacing),
+				Vector3(-0.68 * spacing, 0.0, -0.48 * spacing)
+			].slice(0, member_count)
+		_:
+			return [
+				Vector3.ZERO,
+				Vector3(0.74 * spacing, 0.0, -0.34 * spacing),
+				Vector3(-0.72 * spacing, 0.0, -0.54 * spacing),
+				Vector3(0.10 * spacing, 0.0, -1.02 * spacing)
+			].slice(0, member_count)
+
+
+func _plan_dog_social_assignments(dog_count: int) -> Array:
+	var assignments: Array = []
+	if dog_count <= 0:
+		return assignments
+	var group_ids: Array = _social_groups.keys()
+	group_ids.shuffle()
+	for group_id in group_ids:
+		if assignments.size() >= dog_count:
+			break
+		if _rng.randf() > dog_group_follow_share:
+			continue
+		var group: Dictionary = Dictionary(_social_groups.get(group_id, {}))
+		if group.is_empty():
+			continue
+		assignments.append({
+			"group_id": str(group.get("id", "")),
+			"group_kind": "%s_dog" % str(group.get("kind", "social")),
+			"leader_id": int(group.get("leader_id", -1)),
+			"offset": Vector3(-0.82 * social_group_spacing, 0.0, -0.98 * social_group_spacing)
+		})
+	while assignments.size() < dog_count:
+		assignments.append({})
+	return assignments
+
+
+func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictionary = {}) -> void:
 	var type_index: int = _person_type_for_identity(identity)
 	var activity: Dictionary = _activity_for_identity(identity)
 	var mode: String = str(activity.get("mode", "wander"))
@@ -373,12 +724,26 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}) -> void:
 		root.queue_free()
 		return
 	root.add_child(visual)
-	var spawn: Vector3 = _spawn_position_for_identity(identity)
+	var spawn: Vector3 = _group_spawn_position(identity, group_info)
 	root.position = spawn
 	root.rotation.y = _rng.randf() * TAU
 	root.set_meta("identity", identity)
 	var ped_type: String = PERSON_TYPES[type_index]
 	var speed_scale: float = 0.88 if ped_type == "child" else 1.0
+	var initial_target: Vector3 = Vector3(activity.get("target", _pick_target_for_pedestrian({"identity": identity, "mode": mode}, spawn)))
+	if not group_info.is_empty() and str(group_info.get("role", "solo")) != "leader":
+		var follow_target: Variant = _group_follow_target({
+			"type": ped_type,
+			"root": root,
+			"target": initial_target,
+			"group_id": str(group_info.get("id", "")),
+			"group_kind": str(group_info.get("kind", "solo")),
+			"group_role": str(group_info.get("role", "member")),
+			"leader_person_id": int(group_info.get("leader_id", -1)),
+			"group_offset": Vector3(group_info.get("offset", Vector3.ZERO))
+		}, spawn)
+		if follow_target != null:
+			initial_target = follow_target
 	if show_identity_labels or _tracked_person_ids.has(int(identity.get("id", -1))):
 		_add_identity_label(root, identity)
 	_pedestrians.append({
@@ -387,16 +752,21 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}) -> void:
 		"visual": visual,
 		"identity": identity,
 		"mode": mode,
-		"target": Vector3(activity.get("target", _pick_target_for_pedestrian({"identity": identity, "mode": mode}, spawn))),
+		"target": initial_target,
 		"speed": _pedestrian_speed_for_identity(ped_type, identity, mode) * speed_scale,
+		"group_id": str(group_info.get("id", "")),
+		"group_kind": str(group_info.get("kind", "solo")),
+		"group_role": str(group_info.get("role", "solo")),
+		"leader_person_id": int(group_info.get("leader_id", int(identity.get("id", -1)))),
+		"group_offset": Vector3(group_info.get("offset", Vector3.ZERO)),
 		"bob_phase": _rng.randf() * TAU,
 		"gait_time": _rng.randf() * TAU,
 		"stuck_time": 0.0,
-		"pause_time": _random_pause_for_actor(ped_type, mode)
+		"pause_time": 0.0 if str(group_info.get("role", "solo")) != "leader" and not group_info.is_empty() else _random_pause_for_actor(ped_type, mode)
 	})
 
 
-func _spawn_dog(index: int) -> void:
+func _spawn_dog(index: int, group_info: Dictionary = {}) -> void:
 	var root := Node3D.new()
 	root.name = "Dog_%02d" % index
 	add_child(root)
@@ -411,7 +781,10 @@ func _spawn_dog(index: int) -> void:
 		return
 	visual.scale = Vector3.ONE * dog_model_scale
 	root.add_child(visual)
-	var spawn: Vector3 = _city.call("get_random_walk_point", 0.55)
+	var spawn: Vector3 = _city.call("get_random_walk_point", 0.55) if group_info.is_empty() else _group_spawn_position({}, {
+		"anchor": _leader_anchor_for_group(int(group_info.get("leader_id", -1))),
+		"offset": Vector3(group_info.get("offset", Vector3.ZERO))
+	})
 	root.position = spawn
 	root.rotation.y = _rng.randf() * TAU
 	_pedestrians.append({
@@ -419,15 +792,90 @@ func _spawn_dog(index: int) -> void:
 		"root": root,
 		"visual": visual,
 		"identity": {},
-		"mode": "wander",
-		"target": _pick_target_for_pedestrian({"type": DOG_TYPE}, spawn),
+		"mode": str(group_info.get("group_kind", "wander")),
+		"target": _pick_target_for_pedestrian({"type": DOG_TYPE}, spawn) if group_info.is_empty() else spawn,
 		"speed": _rng.randf_range(dog_walk_speed_min, dog_walk_speed_max),
+		"group_id": str(group_info.get("group_id", "")),
+		"group_kind": str(group_info.get("group_kind", "solo")),
+		"group_role": "dog" if not group_info.is_empty() else "solo",
+		"leader_person_id": int(group_info.get("leader_id", -1)),
+		"group_offset": Vector3(group_info.get("offset", Vector3.ZERO)),
 		"bob_phase": _rng.randf() * TAU,
 		"gait_time": _rng.randf() * TAU,
 		"stuck_time": 0.0,
-		"pause_time": _random_pause_for_actor(DOG_TYPE, "wander"),
+		"pause_time": 0.0 if not group_info.is_empty() else _random_pause_for_actor(DOG_TYPE, "wander"),
 		"dog_parts": _collect_dog_parts(visual)
 	})
+
+
+func _group_spawn_position(identity: Dictionary, group_info: Dictionary) -> Vector3:
+	var anchor: Vector3 = _spawn_position_for_identity(identity)
+	if not group_info.is_empty() and group_info.has("anchor"):
+		anchor = Vector3(group_info.get("anchor", anchor))
+	var offset: Vector3 = Vector3(group_info.get("offset", Vector3.ZERO)) if not group_info.is_empty() else Vector3.ZERO
+	return _offset_group_point(anchor, offset, anchor)
+
+
+func _offset_group_point(anchor: Vector3, offset: Vector3, fallback: Vector3) -> Vector3:
+	var candidate := anchor + Vector3(offset.x, 0.0, offset.z)
+	if _city != null and _city.has_method("try_move_on_walk_ground"):
+		return _city.call("try_move_on_walk_ground", anchor, candidate)
+	if _city != null and _city.has_method("get_nearest_walk_ground_point"):
+		return _city.call("get_nearest_walk_ground_point", candidate)
+	candidate.y = fallback.y
+	return candidate
+
+
+func _leader_anchor_for_group(leader_person_id: int) -> Vector3:
+	if leader_person_id > 0 and _population != null and _population.has_method("get_person"):
+		var leader_identity: Dictionary = _population.call("get_person", leader_person_id)
+		if not leader_identity.is_empty():
+			return _spawn_position_for_identity(leader_identity)
+	return _city.call("get_random_walk_point", 0.55)
+
+
+func _group_follow_target(ped: Dictionary, fallback_position: Vector3) -> Variant:
+	var group_role: String = str(ped.get("group_role", "solo"))
+	if group_role == "solo" or group_role == "leader":
+		return null
+	var leader: Dictionary = _pedestrian_for_leader(int(ped.get("leader_person_id", -1)), str(ped.get("group_id", "")))
+	if leader.is_empty():
+		return null
+	var leader_root: Node3D = leader.get("root") as Node3D
+	if leader_root == null or not is_instance_valid(leader_root):
+		return null
+	var leader_position: Vector3 = leader_root.position
+	var leader_target: Vector3 = Vector3(leader.get("target", leader_position))
+	var forward := Vector2(leader_target.x - leader_position.x, leader_target.z - leader_position.z)
+	if forward.length() < 0.08:
+		forward = Vector2(0.0, 1.0)
+	else:
+		forward = forward.normalized()
+	var right := Vector2(forward.y, -forward.x)
+	var local_offset: Vector3 = Vector3(ped.get("group_offset", Vector3.ZERO))
+	var world_offset := Vector2(right.x * local_offset.x + forward.x * local_offset.z, right.y * local_offset.x + forward.y * local_offset.z)
+	return _offset_group_point(leader_position, Vector3(world_offset.x, 0.0, world_offset.y), fallback_position)
+
+
+func _group_speed_for_actor(ped: Dictionary) -> float:
+	var leader: Dictionary = _pedestrian_for_leader(int(ped.get("leader_person_id", -1)), str(ped.get("group_id", "")))
+	if leader.is_empty():
+		return float(ped.get("speed", walk_speed_min))
+	var leader_speed: float = float(leader.get("speed", walk_speed_min))
+	if str(ped.get("type", "person")) == DOG_TYPE:
+		return leader_speed * 1.08
+	return leader_speed * 0.98
+
+
+func _pedestrian_for_leader(leader_person_id: int, group_id: String) -> Dictionary:
+	var index: int = -1
+	if leader_person_id > 0:
+		index = int(_group_leader_indices_by_person.get(leader_person_id, -1))
+	elif group_id != "":
+		index = int(_group_leader_indices_by_group.get(group_id, -1))
+	if index < 0 or index >= _pedestrians.size():
+		return {}
+	return _pedestrians[index]
 
 
 func _load_optional_scene(asset_path: String) -> PackedScene:
@@ -562,21 +1010,25 @@ func _activity_for_identity(identity: Dictionary) -> Dictionary:
 func _pick_target_for_pedestrian(ped: Dictionary, from_position: Vector3) -> Vector3:
 	var actor_type: String = str(ped.get("type", "person"))
 	var min_distance: float = dog_target_distance_min if actor_type == DOG_TYPE else target_distance_min
+	var preferred_walk_kind: String = ""
 	if _population != null and _population.has_method("get_person_activity"):
 		var identity: Dictionary = ped.get("identity", {})
 		if not identity.is_empty():
 			var activity: Dictionary = _population.call("get_person_activity", int(identity.get("id", -1)))
 			if not activity.is_empty():
+				var mode: String = str(activity.get("mode", "wander"))
+				if mode == "plaza" or mode == "evening_stroll":
+					preferred_walk_kind = "square"
 				var directed_target: Vector3 = activity.get("target", from_position)
 				if Vector2(directed_target.x - from_position.x, directed_target.z - from_position.z).length() >= 1.2:
 					return directed_target
 	if _city == null or not _city.has_method("get_random_walk_point"):
 		return from_position
 	for _attempt in range(12):
-		var candidate: Vector3 = _city.call("get_random_walk_point", 0.55)
+		var candidate: Vector3 = _city.call("get_random_walk_point", 0.55, preferred_walk_kind)
 		if Vector2(candidate.x - from_position.x, candidate.z - from_position.z).length() >= min_distance:
 			return candidate
-	return _city.call("get_random_walk_point", 0.55)
+	return _city.call("get_random_walk_point", 0.55, preferred_walk_kind)
 
 
 func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mode: String) -> float:

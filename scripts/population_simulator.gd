@@ -355,6 +355,18 @@ func get_dashboard_snapshot() -> Dictionary:
 	}
 
 
+func get_visual_time_state() -> Dictionary:
+	return {
+		"year": _current_year,
+		"day_of_year": _current_day_of_year,
+		"hour": snappedf(_current_hour, 0.01),
+		"day_phase": get_day_phase_label(),
+		"time_label": get_time_label(),
+		"time_scale": hours_per_second,
+		"paused": _paused
+	}
+
+
 func get_person_activity(person_id: int) -> Dictionary:
 	var person: Dictionary = _people_by_id.get(person_id, {})
 	if person.is_empty() or not bool(person.get("alive", true)):
@@ -1263,14 +1275,33 @@ func _pick_destination_for_person(person: Dictionary, preferred_kinds: Array) ->
 		var b_venue: String = str(b.get("venue_type", ""))
 		if (a_venue != "") != (b_venue != ""):
 			return a_venue != ""
-		var a_entry: Vector3 = Vector3(a.get("entry", a.get("center", home_entry)))
-		var b_entry: Vector3 = Vector3(b.get("entry", b.get("center", home_entry)))
-		return Vector2(a_entry.x - home_entry.x, a_entry.z - home_entry.z).length_squared() < Vector2(b_entry.x - home_entry.x, b_entry.z - home_entry.z).length_squared()
+		var a_point: Vector3 = _representative_destination_point(a, home_entry)
+		var b_point: Vector3 = _representative_destination_point(b, home_entry)
+		return Vector2(a_point.x - home_entry.x, a_point.z - home_entry.z).length_squared() < Vector2(b_point.x - home_entry.x, b_point.z - home_entry.z).length_squared()
 	)
 	var choice_pool: Array = candidates.slice(0, mini(8, candidates.size()))
 	var choice_index: int = _positive_modulo(int(person.get("id", -1)) * 19 + _current_day_of_year * 7 + _current_year, choice_pool.size())
 	var choice: Dictionary = choice_pool[choice_index]
-	return Vector3(choice.get("entry", choice.get("center", home_entry)))
+	return _destination_point_for_slot(choice, int(person.get("id", -1)), home_entry)
+
+
+func _representative_destination_point(slot: Dictionary, fallback: Vector3) -> Vector3:
+	var entry_points: Array = slot.get("entry_points", [])
+	if not entry_points.is_empty():
+		return Vector3(entry_points[0])
+	return Vector3(slot.get("entry", slot.get("center", fallback)))
+
+
+func _destination_point_for_slot(slot: Dictionary, person_id: int, fallback: Vector3) -> Vector3:
+	var gathering_points: Array = slot.get("gathering_points", [])
+	if not gathering_points.is_empty():
+		var gather_index: int = _positive_modulo(person_id * 11 + _current_day_of_year * 5 + _current_year, gathering_points.size())
+		return Vector3(gathering_points[gather_index])
+	var entry_points: Array = slot.get("entry_points", [])
+	if not entry_points.is_empty():
+		var entry_index: int = _positive_modulo(person_id * 17 + _current_day_of_year * 3 + _current_year, entry_points.size())
+		return Vector3(entry_points[entry_index])
+	return Vector3(slot.get("entry", slot.get("center", fallback)))
 
 
 func _pick(items: Array) -> Variant:

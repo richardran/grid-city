@@ -37,6 +37,16 @@ const MAX_FLOORS: int = 24
 
 static var _mesh_cache: Dictionary = {}
 static var _material_cache: Dictionary = {}
+static var _lighting_state: Dictionary = {
+	"daylight": 1.0,
+	"night": 0.0,
+	"blue_hour": 0.0,
+	"warm_hour": 0.0,
+	"window_strength": 0.06,
+	"storefront_strength": 0.0,
+	"lamp_strength": 0.0,
+	"window_color_bias": Color(0.98, 0.84, 0.66)
+}
 
 
 static func is_supported_window_module_id(module_id: int) -> bool:
@@ -325,6 +335,21 @@ static func clear_caches() -> void:
 	_material_cache.clear()
 
 
+static func apply_lighting_state(state: Dictionary) -> void:
+	_lighting_state = state.duplicate(true)
+	for key in ["default|glass", "painted_lady_mint|glass"]:
+		if not _material_cache.has(key):
+			continue
+		var material := _material_cache[key] as StandardMaterial3D
+		if material == null:
+			continue
+		_apply_glass_lighting(material, key.get_slice("|", 0), _lighting_state)
+
+
+static func get_lighting_state() -> Dictionary:
+	return _lighting_state.duplicate(true)
+
+
 static func build_building_from_spec(spec: Dictionary) -> Node3D:
 	var request: Dictionary = spec.get("request", {})
 	var root := Node3D.new()
@@ -567,9 +592,7 @@ static func _material(kind: String, palette: String = "default") -> StandardMate
 			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			material.metallic = 0.04
 			material.roughness = 0.06
-			material.emission_enabled = true
-			material.emission = Color(0.70, 0.90, 0.88)
-			material.emission_energy_multiplier = 0.16
+			_apply_glass_lighting(material, palette, _lighting_state)
 		"painted_lady_mint|roof":
 			material.albedo_color = Color(0.37, 0.46, 0.47)
 			material.roughness = 0.76
@@ -588,9 +611,7 @@ static func _material(kind: String, palette: String = "default") -> StandardMate
 			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			material.metallic = 0.05
 			material.roughness = 0.08
-			material.emission_enabled = true
-			material.emission = Color(0.60, 0.80, 0.95)
-			material.emission_energy_multiplier = 0.1
+			_apply_glass_lighting(material, palette, _lighting_state)
 		"default|roof":
 			material.albedo_color = Color(0.56, 0.59, 0.63)
 			material.roughness = 0.80
@@ -598,6 +619,26 @@ static func _material(kind: String, palette: String = "default") -> StandardMate
 			material.albedo_color = Color.WHITE
 	_material_cache[key] = material
 	return material
+
+
+static func _apply_glass_lighting(material: StandardMaterial3D, palette: String, state: Dictionary) -> void:
+	var daylight: float = float(state.get("daylight", 1.0))
+	var night: float = float(state.get("night", 0.0))
+	var blue_hour: float = float(state.get("blue_hour", 0.0))
+	var warm_hour: float = float(state.get("warm_hour", 0.0))
+	var window_strength: float = float(state.get("window_strength", 0.08))
+	var day_glass := Color(0.60, 0.80, 0.95, 0.46)
+	var warm_glass := Color(0.98, 0.84, 0.66, 0.58)
+	var cool_glass := Color(0.66, 0.86, 0.92, 0.52)
+	if palette == "painted_lady_mint":
+		day_glass = Color(0.68, 0.88, 0.90, 0.54)
+		cool_glass = Color(0.72, 0.90, 0.92, 0.58)
+	var night_mix: float = clampf(maxf(night * 0.95, blue_hour * 0.55), 0.0, 1.0)
+	var warm_mix: float = clampf(warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
+	material.albedo_color = day_glass.lerp(cool_glass, blue_hour * 0.45).lerp(warm_glass, warm_mix)
+	material.emission_enabled = true
+	material.emission = cool_glass.lerp(warm_glass, warm_mix)
+	material.emission_energy_multiplier = lerpf(0.04, 0.24, daylight * 0.18 + blue_hour * 0.28) + night_mix * window_strength
 
 
 static func _normalize_roof_type(value: String) -> String:

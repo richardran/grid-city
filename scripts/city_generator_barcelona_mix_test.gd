@@ -24,15 +24,28 @@ func _init() -> void:
 	assert(request["module_ids"].size() >= 2)
 	assert(request["module_ids"].has(100))
 	var slot_kinds: Array = []
+	var plaza_slot: Dictionary = {}
 	for slot in generator.get_building_slots_snapshot():
 		slot_kinds.append(String(slot.get("kind", "")))
+		if plaza_slot.is_empty() and (String(slot.get("kind", "")) == "plaza" or String(slot.get("kind", "")) == "civic_landmark"):
+			plaza_slot = slot
 	assert(slot_kinds.has("civic_landmark") or slot_kinds.has("plaza"))
+	assert(not plaza_slot.is_empty())
+	assert(Array(plaza_slot.get("entry_points", [])).size() >= 4)
+	assert(Array(plaza_slot.get("gathering_points", [])).size() >= 4)
+	var square_point: Vector3 = generator.get_random_walk_point(0.2, "square")
+	assert(absf(square_point.y - float(plaza_slot.get("top_y", square_point.y))) < 0.25)
+	var snapped_square: Vector3 = generator.try_move_on_walk_ground(square_point + Vector3(0.3, 0.0, 0.3), square_point)
+	assert(absf(snapped_square.y - float(plaza_slot.get("top_y", snapped_square.y))) < 0.25)
 	var block_found: bool = false
 	for block in generator.get_block_centers_snapshot():
 		if bool(block.get("is_plaza", false)):
 			block_found = true
 			assert(String(block.get("district", "")).length() > 0)
 	assert(block_found)
+	var lighting_debug: Dictionary = generator.get_lighting_debug_snapshot()
+	assert(int(lighting_debug.get("street_lamps", 0)) > 0)
+	assert(int(lighting_debug.get("emissive_profiles", 0)) > 0)
 
 	var generator2 := CityGeneratorScript.new()
 	generator2.regenerate_on_ready = false
@@ -50,6 +63,8 @@ func _init() -> void:
 			venue_found = true
 			break
 	assert(venue_found)
+	var lighting_debug2: Dictionary = generator2.get_lighting_debug_snapshot()
+	assert(int(lighting_debug2.get("house_windows", 0)) > 0)
 
 	generator.free()
 	generator2.free()

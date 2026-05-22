@@ -132,7 +132,16 @@ func _parts_city_panel(parts: PackedStringArray, walk_areas: Array, events: Arra
 		var x1: float = _map_x(float(area["x"].y), total_width, inner_x, inner_w)
 		var y0: float = _map_y(float(area["z"].x), total_depth, inner_y, inner_h)
 		var y1: float = _map_y(float(area["z"].y), total_depth, inner_y, inner_h)
-		parts.append('<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="0.8"/>' % [x0, y0, x1 - x0, y1 - y0])
+		var kind: String = str(area.get("kind", "road"))
+		var fill: String = "#e2e8f0"
+		var stroke: String = "#cbd5e1"
+		if kind == "square":
+			fill = "#f5e7c6"
+			stroke = "#d6b980"
+		elif kind == "square_entry":
+			fill = "#f2d3a2"
+			stroke = "#c9974f"
+		parts.append('<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="%s" stroke="%s" stroke-width="0.8"/>' % [x0, y0, x1 - x0, y1 - y0, fill, stroke])
 	for event in events:
 		if not (event is Dictionary):
 			continue
