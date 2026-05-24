@@ -1,6 +1,15 @@
 extends CanvasLayer
 class_name PopulationUI
 
+const CHAT_BOX_COUNT := 3
+const SUMMARY_PATH := "Panel/Margin/VBox/Summary"
+const SELECTION_PATH := "Panel/Margin/VBox/Selection"
+const LIST_PATH := "Panel/Margin/VBox/List"
+const EVENTS_PATH := "Panel/Margin/VBox/Events"
+const TOGGLE_PAUSE_PATH := "Panel/Margin/VBox/Controls/TogglePause"
+const TOGGLE_VIEW_PATH := "Panel/Margin/VBox/Controls/ShowPopulation"
+const LATEST_EVENT_PATH := "Panel/Margin/VBox/Controls/PrevPage"
+
 @export var population_path: NodePath
 @export var crowd_path: NodePath
 @export var camera_path: NodePath
@@ -16,30 +25,48 @@ var _page_index: int = 0
 var _resident_page_size: int = 10
 var _household_page_size: int = 8
 var _tracked_ages_by_id: Dictionary = {}
+var _conversation_overlay: Control
+var _conversation_boxes: Array = []
+var _summary_label: RichTextLabel
+var _selection_label: RichTextLabel
+var _list_label: RichTextLabel
+var _events_label: RichTextLabel
+var _pause_button: Button
+var _toggle_view_button: Button
+var _latest_event_button: Button
 
 
 func _ready() -> void:
 	_population = get_node_or_null(population_path)
 	_crowd = get_node_or_null(crowd_path)
 	_camera = get_node_or_null(camera_path) as Camera3D
+	_summary_label = get_node_or_null(SUMMARY_PATH) as RichTextLabel
+	_selection_label = get_node_or_null(SELECTION_PATH) as RichTextLabel
+	_list_label = get_node_or_null(LIST_PATH) as RichTextLabel
+	_events_label = get_node_or_null(EVENTS_PATH) as RichTextLabel
+	_pause_button = get_node_or_null(TOGGLE_PAUSE_PATH) as Button
+	_toggle_view_button = get_node_or_null(TOGGLE_VIEW_PATH) as Button
+	_latest_event_button = get_node_or_null(LATEST_EVENT_PATH) as Button
+	_ensure_conversation_boxes()
 	if _population != null and _population.has_signal("life_event") and not _population.is_connected("life_event", Callable(self, "_on_life_event")):
 		_population.connect("life_event", Callable(self, "_on_life_event"))
-	_wire_button("Panel/Margin/VBox/Controls/TogglePause", _on_toggle_pause)
-	_wire_button("Panel/Margin/VBox/Controls/CycleSpeed", _on_cycle_speed)
-	_wire_button("Panel/Margin/VBox/Controls/Advance6Hours", _on_advance_6_hours)
+	_wire_button(TOGGLE_PAUSE_PATH, _on_toggle_pause)
 	_wire_button("Panel/Margin/VBox/Controls/AdvanceYear", _on_advance_year)
 	_wire_button("Panel/Margin/VBox/Controls/NextResident", _on_next_resident)
 	_wire_button("Panel/Margin/VBox/Controls/NextHousehold", _on_next_household)
-	_wire_button("Panel/Margin/VBox/Controls/JumpToSelection", _on_jump_to_selection)
-	_wire_button("Panel/Margin/VBox/Controls/ShowPopulation", _on_set_ground_view)
-	_wire_button("Panel/Margin/VBox/Controls/ShowHouseholds", _on_set_overlook_view)
-	_wire_button("Panel/Margin/VBox/Controls/PrevPage", _on_jump_to_latest_event)
-	var next_page_button := get_node_or_null("Panel/Margin/VBox/Controls/NextPage") as Control
-	if next_page_button != null:
-		next_page_button.visible = false
-	var spacer := get_node_or_null("Panel/Margin/VBox/Controls/Spacer") as Control
-	if spacer != null:
-		spacer.visible = false
+	_wire_button(TOGGLE_VIEW_PATH, _on_toggle_view)
+	_wire_button(LATEST_EVENT_PATH, _on_jump_to_latest_event)
+	for hidden_path in [
+		"Panel/Margin/VBox/Controls/CycleSpeed",
+		"Panel/Margin/VBox/Controls/Advance6Hours",
+		"Panel/Margin/VBox/Controls/JumpToSelection",
+		"Panel/Margin/VBox/Controls/ShowHouseholds",
+		"Panel/Margin/VBox/Controls/NextPage",
+		"Panel/Margin/VBox/Controls/Spacer"
+	]:
+		var hidden_control := get_node_or_null(hidden_path) as Control
+		if hidden_control != null:
+			hidden_control.visible = false
 	if _population != null and _population.has_method("get_random_residents"):
 		var residents: Array = _population.call("get_random_residents", 1)
 		if not residents.is_empty():
@@ -54,6 +81,80 @@ func _process(delta: float) -> void:
 	if _refresh_accum >= 0.25:
 		_refresh_accum = 0.0
 		_update_ui()
+	_update_conversation_boxes()
+
+
+func get_chat_box_count() -> int:
+	return _conversation_boxes.size()
+
+
+func get_visible_chat_box_count() -> int:
+	var count: int = 0
+	for box in _conversation_boxes:
+		var control := box as Control
+		if control != null and control.visible:
+			count += 1
+	return count
+
+
+func _ensure_conversation_boxes() -> void:
+	if _conversation_overlay != null:
+		return
+	_conversation_overlay = Control.new()
+	_conversation_overlay.name = "ConversationOverlay"
+	_conversation_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_conversation_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_conversation_overlay)
+	for index in range(CHAT_BOX_COUNT):
+		var box := PanelContainer.new()
+		box.name = "ChatBox%d" % index
+		box.visible = false
+		box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		box.size = Vector2(210.0, 58.0)
+		var margin := MarginContainer.new()
+		margin.name = "BubbleMargin"
+		margin.set("theme_override_constants/margin_left", 10)
+		margin.set("theme_override_constants/margin_top", 6)
+		margin.set("theme_override_constants/margin_right", 10)
+		margin.set("theme_override_constants/margin_bottom", 6)
+		box.add_child(margin)
+		var label := Label.new()
+		label.name = "Text"
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		label.custom_minimum_size = Vector2(190.0, 44.0)
+		margin.add_child(label)
+		_conversation_overlay.add_child(box)
+		_conversation_boxes.append(box)
+
+
+func _update_conversation_boxes() -> void:
+	for box in _conversation_boxes:
+		var control := box as Control
+		if control != null:
+			control.visible = false
+	if _crowd == null or not _crowd.has_method("get_conversation_chat_snapshot") or _camera == null:
+		return
+	var chat_snapshot: Array = _crowd.call("get_conversation_chat_snapshot")
+	var viewport_rect: Rect2 = get_viewport().get_visible_rect()
+	var box_index: int = 0
+	for entry in chat_snapshot:
+		if box_index >= _conversation_boxes.size():
+			break
+		var world_point: Vector3 = Vector3(Dictionary(entry).get("speaker_position", Vector3.ZERO))
+		if _camera.is_position_behind(world_point):
+			continue
+		var screen_point: Vector2 = _camera.unproject_position(world_point)
+		if not viewport_rect.has_point(screen_point):
+			continue
+		var box := _conversation_boxes[box_index] as PanelContainer
+		var label := box.get_node_or_null("BubbleMargin/Text") as Label
+		if label == null:
+			continue
+		label.text = str(Dictionary(entry).get("text", ""))
+		box.position = screen_point - box.size * Vector2(0.5, 1.0) - Vector2(0.0, 10.0)
+		box.visible = true
+		box_index += 1
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -76,36 +177,23 @@ func _update_ui() -> void:
 		return
 	var snapshot: Dictionary = _population.call("get_dashboard_snapshot")
 	var summary: Dictionary = snapshot.get("summary", {})
-	var summary_label := get_node_or_null("Panel/Margin/VBox/Summary") as RichTextLabel
-	if summary_label != null:
-		summary_label.text = "[b]%s[/b]\nPopulation: %d | Households: %d | Lineages: %d\nChildren: %d | Adults: %d | Seniors: %d | Workers: %d\nBirths: %d | Deaths: %d | Crowd shown: %d" % [
-			summary.get("time_label", "Time unavailable"),
-			summary.get("population", 0),
-			summary.get("households", 0),
-			summary.get("lineages", 0),
-			summary.get("children", 0),
-			summary.get("adults", 0),
-			summary.get("seniors", 0),
-			summary.get("workers", 0),
-			summary.get("births", 0),
-			summary.get("deaths", 0),
-			_crowd.get_pedestrian_count() if _crowd != null and _crowd.has_method("get_pedestrian_count") else 0
+	if _summary_label != null:
+		var api_status: Dictionary = _crowd.call("get_api_detection_snapshot") if _crowd != null and _crowd.has_method("get_api_detection_snapshot") else {}
+		var summary_lines: Array[String] = [
+			"[b]%s[/b]" % summary.get("time_label", "Time unavailable"),
+			"Population: %d | Households: %d | Lineages: %d" % [summary.get("population", 0), summary.get("households", 0), summary.get("lineages", 0)],
+			"Children: %d | Adults: %d | Seniors: %d | Workers: %d" % [summary.get("children", 0), summary.get("adults", 0), summary.get("seniors", 0), summary.get("workers", 0)],
+			"Births: %d | Deaths: %d | Crowd shown: %d" % [summary.get("births", 0), summary.get("deaths", 0), _crowd.get_pedestrian_count() if _crowd != null and _crowd.has_method("get_pedestrian_count") else 0]
 		]
-	var speed_button := get_node_or_null("Panel/Margin/VBox/Controls/CycleSpeed") as Button
-	if speed_button != null:
-		speed_button.text = "Speed %.1fh/s" % float(summary.get("time_scale", 0.0))
-	var pause_button := get_node_or_null("Panel/Margin/VBox/Controls/TogglePause") as Button
-	if pause_button != null:
-		pause_button.text = "Resume" if bool(summary.get("paused", false)) else "Pause"
-	var ground_view_button := get_node_or_null("Panel/Margin/VBox/Controls/ShowPopulation") as Button
-	if ground_view_button != null:
-		ground_view_button.text = "Ground ✓" if _current_view_mode() == "ground" else "Ground"
-	var overlook_view_button := get_node_or_null("Panel/Margin/VBox/Controls/ShowHouseholds") as Button
-	if overlook_view_button != null:
-		overlook_view_button.text = "Overlook ✓" if _current_view_mode() == "overlook" else "Overlook"
-	var latest_event_button := get_node_or_null("Panel/Margin/VBox/Controls/PrevPage") as Button
-	if latest_event_button != null:
-		latest_event_button.text = "Latest event"
+		if not api_status.is_empty():
+			summary_lines.append("OpenRouter key: %s" % ("detected" if bool(api_status.get("text", false)) else "missing"))
+		_summary_label.text = "\n".join(summary_lines)
+	if _pause_button != null:
+		_pause_button.text = "Resume" if bool(summary.get("paused", false)) else "Pause"
+	if _toggle_view_button != null:
+		_toggle_view_button.text = "View: %s" % _current_view_label()
+	if _latest_event_button != null:
+		_latest_event_button.text = "Latest event"
 	_update_selection_details()
 	var recent_events: Array = snapshot.get("recent_event_records", snapshot.get("recent_events", []))
 	_update_list_panel(recent_events)
@@ -115,8 +203,7 @@ func _update_ui() -> void:
 
 
 func _update_selection_details() -> void:
-	var details := get_node_or_null("Panel/Margin/VBox/Selection") as RichTextLabel
-	if details == null:
+	if _selection_label == null:
 		return
 	var lines: Array[String] = []
 	if _selected_person_id != -1 and _population.has_method("get_person"):
@@ -165,12 +252,11 @@ func _update_selection_details() -> void:
 			lines.append("Building: %s" % household.get("building_id", -1))
 	if lines.is_empty():
 		lines.append("[b]Selection[/b]\nClick a resident in the world or use the buttons below to inspect residents or households.")
-	details.text = "\n".join(lines)
+	_selection_label.text = "\n".join(lines)
 
 
 func _update_list_panel(events: Array) -> void:
-	var list_label := get_node_or_null("Panel/Margin/VBox/List") as RichTextLabel
-	if list_label == null:
+	if _list_label == null:
 		return
 	var lines: Array[String] = ["[b]Event feed[/b]"]
 	if events.is_empty():
@@ -188,27 +274,31 @@ func _update_list_panel(events: Array) -> void:
 				])
 			else:
 				lines.append("• %s" % str(event))
-	list_label.text = "\n".join(lines)
+	_list_label.text = "\n".join(lines)
 
 
 func _update_events(events: Array) -> void:
-	var log := get_node_or_null("Panel/Margin/VBox/Events") as RichTextLabel
-	if log == null:
+	if _events_label == null:
 		return
 	var lines: Array[String] = ["[b]View[/b]"]
 	var summary: Dictionary = _population.call("get_population_summary") if _population != null and _population.has_method("get_population_summary") else {}
 	lines.append("Mode: %s" % _current_view_label())
 	lines.append("Phase: %s" % str(summary.get("day_phase", "day")))
-	lines.append("Move: arrows | Toggle view: V")
+	lines.append("Move: arrows | View toggle: V")
 	lines.append("Blue hour is around sunrise/sunset; moon shows best near sunset/night.")
-	lines.append("Click a resident to inspect their lineage.")
+	lines.append("Click a resident to inspect them and trigger a quick chat.")
 	lines.append("Names appear when residents are near you.")
+	var api_status: Dictionary = _crowd.call("get_api_detection_snapshot") if _crowd != null and _crowd.has_method("get_api_detection_snapshot") else {}
+	if not api_status.is_empty():
+		if not bool(api_status.get("text", false)):
+			lines.append("")
+			lines.append("OpenRouter text is disabled until OPENROUTER_API_KEY is visible to Godot.")
 	if not events.is_empty() and events[events.size() - 1] is Dictionary:
 		var latest: Dictionary = events[events.size() - 1]
 		lines.append("")
 		lines.append("[b]Latest life event[/b]")
 		lines.append("%s %s" % [_event_prefix(str(latest.get("type", "system"))), str(latest.get("text", "event"))])
-	log.text = "\n".join(lines)
+	_events_label.text = "\n".join(lines)
 
 
 func _event_prefix(event_type: String) -> String:
@@ -354,6 +444,18 @@ func _on_next_household() -> void:
 	_update_ui()
 
 
+func _on_toggle_view() -> void:
+	if _camera != null and _camera.has_method("toggle_view_mode"):
+		_camera.call("toggle_view_mode")
+	elif _current_view_mode() == "overlook":
+		_on_set_ground_view()
+		return
+	else:
+		_on_set_overlook_view()
+		return
+	_update_ui()
+
+
 func _on_set_ground_view() -> void:
 	if _camera != null and _camera.has_method("set_view_mode"):
 		_camera.call("set_view_mode", "ground")
@@ -420,6 +522,8 @@ func _pick_person_at_screen(screen_position: Vector2) -> void:
 	var person_id: int = int(hit.get("person_id", -1))
 	if person_id != -1:
 		select_person(person_id)
+		if _crowd.has_method("trigger_player_conversation_for_person"):
+			_crowd.call("trigger_player_conversation_for_person", person_id)
 
 
 func _relationship_names(raw_ids: Variant, limit: int = 4) -> String:

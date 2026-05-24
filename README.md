@@ -19,6 +19,8 @@ This version was rebuilt from scratch around a simple rule:
 - Creates a house/foundation block in every block formed by the road grid
 - Places house masses on top of each block foundation
 - Constrains the viewer to explicit walkable road surfaces
+- Shows ambient pedestrian conversation bubbles, including occasional player-nearby remarks when you get close enough
+- Can optionally pull player-directed NPC lines from OpenRouter when `OPENROUTER_API_KEY` is set in the environment
 
 ## Run
 
@@ -33,6 +35,26 @@ Or open the `godot-city-grid` folder in the Godot editor.
 - `Up / Down`: walk forward / backward
 - `Left / Right`: turn
 - `V`: toggle between ground view and overlook view
+- Walk near pedestrians to occasionally trigger short nearby remarks
+- Click a pedestrian to inspect them and force a short conversation with that person
+
+## Optional OpenRouter dialogue
+
+If `OPENROUTER_API_KEY` is available in the environment, player-nearby pedestrian remarks can be replaced with short generated lines via OpenRouter.
+
+The crowd script defaults to `openrouter/auto`, which lets OpenRouter route to a fast available model automatically. You can override that in the `Crowd` node with `openrouter_model` if you want a fixed model instead.
+
+## Optional voiced conversations
+
+Player-directed conversation lines can also be rendered to voice and played back through an OpenAI-compatible speech API.
+
+Default settings expect:
+- `OPENAI_API_KEY`
+- `https://api.openai.com/v1/audio/speech`
+- model `gpt-4o-mini-tts`
+- voice `alloy`
+
+You can change the environment variable name, API base URL, model, and voice on the `Crowd` node if you want to use another compatible provider.
 
 ## Main files
 

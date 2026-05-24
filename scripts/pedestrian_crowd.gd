@@ -9,6 +9,8 @@ const PERSON_SCENE_PATHS := [
 const DOG_SCENE_PATH := "res://assets/characters/dog_companion.glb"
 const DOG_TYPE := "dog"
 const PERSON_TYPES := ["man", "woman", "child"]
+const OPENROUTER_ENV_KEY := "OPENROUTER_API_KEY"
+const OPENROUTER_CHAT_URL := "https://openrouter.ai/api/v1/chat/completions"
 const PERSON_COLORS := {
 	"man": Color(0.28, 0.45, 0.79),
 	"woman": Color(0.82, 0.39, 0.46),
@@ -48,6 +50,23 @@ const PERSON_COLORS := {
 @export_range(0.55, 1.8, 0.05) var social_group_spacing: float = 0.92
 @export_range(2, 5, 1) var max_social_group_members: int = 4
 @export_range(0.0, 1.0, 0.05) var dog_group_follow_share: float = 0.72
+@export_range(0.0, 1.0, 0.05) var hotspot_resident_bias_share: float = 0.58
+@export var event_spectator_pull_count: int = 6
+@export_range(1.5, 10.0, 0.1) var event_spectator_radius: float = 4.8
+@export_range(0.0, 1.0, 0.05) var meetup_join_share: float = 0.24
+@export_range(1.0, 8.0, 0.1) var meetup_join_radius: float = 3.2
+@export_range(0.5, 12.0, 0.1) var meetup_cooldown_seconds: float = 4.5
+@export_range(0.0, 1.0, 0.05) var conversation_share: float = 0.58
+@export_range(1.0, 10.0, 0.1) var conversation_radius: float = 4.6
+@export_range(0.5, 8.0, 0.1) var conversation_line_duration: float = 2.2
+@export_range(0.0, 1.0, 0.05) var player_conversation_share: float = 0.7
+@export_range(1.0, 14.0, 0.1) var player_conversation_radius: float = 7.5
+@export_range(0.5, 8.0, 0.1) var player_conversation_cooldown: float = 3.6
+@export var enable_llm_conversations: bool = true
+@export var openrouter_model: String = "openai/gpt-4.1-mini"
+@export_range(64, 512, 16) var openrouter_max_tokens: int = 320
+@export_range(2.0, 30.0, 0.5) var openrouter_timeout_seconds: float = 10.0
+@export_range(0.05, 1.0, 0.05) var label_visibility_update_interval: float = 0.2
 
 var _city: Node
 var _population: Node
@@ -66,23 +85,46 @@ var _person_group_assignments: Dictionary = {}
 var _group_leader_indices_by_person: Dictionary = {}
 var _group_leader_indices_by_group: Dictionary = {}
 var _dog_group_assignments: Array = []
+var _dynamic_group_index: int = 0
+var _active_conversations: Array = []
+var _next_conversation_delay: float = 1.2
+var _player_conversation_delay: float = 0.9
+var _openrouter_api_key: String = ""
+var _openrouter_request_in_flight: bool = false
+var _openrouter_request: HTTPRequest
+var _label_visibility_elapsed: float = 0.0
 
 
 func _ready() -> void:
 	_resolve_city()
 	_resolve_camera()
+	_openrouter_api_key = OS.get_environment(OPENROUTER_ENV_KEY).strip_edges()
+	if enable_llm_conversations:
+		_openrouter_request = HTTPRequest.new()
+		_openrouter_request.name = "OpenRouterRequest"
+		_openrouter_request.timeout = openrouter_timeout_seconds
+		_openrouter_request.request_completed.connect(_on_openrouter_request_completed)
+		add_child(_openrouter_request)
 	call_deferred("populate_now")
 
 
 func clear_pedestrians() -> void:
 	_pedestrians.clear()
 	_active_event_effects.clear()
+	_active_conversations.clear()
 	_social_groups.clear()
 	_person_group_assignments.clear()
 	_group_leader_indices_by_person.clear()
 	_group_leader_indices_by_group.clear()
 	_dog_group_assignments.clear()
+	_dynamic_group_index = 0
+	_next_conversation_delay = 1.2
+	_player_conversation_delay = 0.9
+	_openrouter_request_in_flight = false
+	_label_visibility_elapsed = label_visibility_update_interval
 	for child in get_children():
+		if child == _openrouter_request:
+			continue
 		child.queue_free()
 
 
@@ -119,6 +161,36 @@ func get_active_event_effect_count() -> int:
 	return _active_event_effects.size()
 
 
+func get_conversation_chat_snapshot() -> Array:
+	var snapshot: Array = []
+	for conversation in _active_conversations:
+		var line_index: int = int(conversation.get("line_index", 0))
+		var lines: Array = conversation.get("lines", [])
+		if line_index < 0 or line_index >= lines.size():
+			continue
+		var line: Dictionary = Dictionary(lines[line_index])
+		var speaker_index: int = int(line.get("speaker_index", -1))
+		if speaker_index < 0 or speaker_index >= _pedestrians.size():
+			continue
+		var speaker: Dictionary = _pedestrians[speaker_index]
+		var root: Node3D = speaker.get("root") as Node3D
+		if root == null or not is_instance_valid(root):
+			continue
+		var speaker_position: Vector3 = root.global_position if root.is_inside_tree() else root.position
+		var display_text: String = "..." if bool(conversation.get("llm_pending", false)) and bool(conversation.get("is_player", false)) else str(line.get("text", ""))
+		snapshot.append({
+			"conversation_id": str(conversation.get("id", "")),
+			"speaker_index": speaker_index,
+			"speaker_position": speaker_position + Vector3(0.0, 2.45, 0.0),
+			"text": display_text,
+			"is_player": bool(conversation.get("is_player", false)),
+			"llm_pending": bool(conversation.get("llm_pending", false))
+		})
+		if snapshot.size() >= 3:
+			break
+	return snapshot
+
+
 func get_pedestrian_debug_snapshot() -> Array:
 	var snapshot: Array = []
 	for ped in _pedestrians:
@@ -132,6 +204,9 @@ func get_pedestrian_debug_snapshot() -> Array:
 			"position": ped["root"].position,
 			"target": ped["target"],
 			"mode": str(ped.get("mode", "wander")),
+			"motivation": str(ped.get("motivation", "habit")),
+			"goal": str(ped.get("goal", str(ped.get("mode", "wander")))),
+			"initiative": str(ped.get("initiative", "self")),
 			"group_kind": str(ped.get("group_kind", "solo")),
 			"group_id": str(ped.get("group_id", "")),
 			"speed": ped["speed"],
@@ -174,6 +249,7 @@ func _process(delta: float) -> void:
 		return
 	var slice_count: int = maxi(1, crowd_update_slices)
 	var frame_phase: int = _frame_counter % slice_count
+	var engaged_player_speakers: Dictionary = _player_conversation_speaker_lookup()
 	_frame_counter += 1
 	for index in range(_pedestrians.size()):
 		var ped: Dictionary = _pedestrians[index]
@@ -181,9 +257,17 @@ func _process(delta: float) -> void:
 		var visual: Node3D = ped["visual"]
 		if not is_instance_valid(root) or not is_instance_valid(visual):
 			continue
+		ped["meet_cooldown"] = maxf(0.0, float(ped.get("meet_cooldown", 0.0)) - delta)
 		var identity: Dictionary = ped.get("identity", {})
 		var tracked: bool = not identity.is_empty() and _tracked_person_ids.has(int(identity.get("id", -1)))
 		if not tracked and slice_count > 1 and index % slice_count != frame_phase:
+			ped = _animate_actor_visual(ped, delta, false)
+			_pedestrians[index] = ped
+			continue
+		if engaged_player_speakers.has(index):
+			ped["pause_time"] = maxf(float(ped.get("pause_time", 0.0)), 0.15)
+			ped["stuck_time"] = 0.0
+			_face_actor_toward_player(root, delta)
 			ped = _animate_actor_visual(ped, delta, false)
 			_pedestrians[index] = ped
 			continue
@@ -237,8 +321,13 @@ func _process(delta: float) -> void:
 		root.rotation.y = lerp_angle(root.rotation.y, heading, minf(1.0, delta * turn_lerp_speed))
 		ped = _animate_actor_visual(ped, delta, true)
 		_pedestrians[index] = ped
+	_update_conversations(delta)
+	_attempt_dynamic_meetups()
 	_update_event_effects(delta)
-	_update_label_visibility()
+	_label_visibility_elapsed += delta
+	if _label_visibility_elapsed >= label_visibility_update_interval:
+		_label_visibility_elapsed = 0.0
+		_update_label_visibility()
 
 
 func _resolve_city() -> void:
@@ -327,6 +416,7 @@ func play_life_event_effect(event: Dictionary) -> void:
 	if event_type != "birth" and event_type != "marriage" and event_type != "death" and event_type != "birthday":
 		return
 	_spawn_world_event_effect(event)
+	_pull_crowd_toward_event(event)
 	var person_ids: Array = event.get("person_ids", [])
 	for ped in _pedestrians:
 		var root: Node3D = ped.get("root") as Node3D
@@ -337,6 +427,91 @@ func play_life_event_effect(event: Dictionary) -> void:
 		if person_id == -1 or not person_ids.has(person_id):
 			continue
 		_spawn_event_effect(root, event)
+
+
+func _pull_crowd_toward_event(event: Dictionary) -> void:
+	if event_spectator_pull_count <= 0 or _pedestrians.is_empty():
+		return
+	var anchor: Vector3 = _event_anchor_for(event)
+	if anchor == Vector3.INF:
+		return
+	var candidates: Array = []
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
+		if str(ped.get("type", "person")) == DOG_TYPE:
+			continue
+		if not _mode_allows_event_audience(str(ped.get("mode", "wander"))):
+			continue
+		var root: Node3D = ped.get("root") as Node3D
+		if root == null or not is_instance_valid(root):
+			continue
+		var distance: float = root.position.distance_to(anchor)
+		candidates.append({
+			"index": index,
+			"distance": distance,
+			"score": _event_audience_score(ped, distance)
+		})
+	if candidates.is_empty():
+		return
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
+	)
+	var pull_count: int = mini(event_spectator_pull_count, candidates.size())
+	for candidate_index in range(pull_count):
+		var candidate: Dictionary = candidates[candidate_index]
+		var ped_index: int = int(candidate.get("index", -1))
+		if ped_index < 0 or ped_index >= _pedestrians.size():
+			continue
+		var ped: Dictionary = _pedestrians[ped_index]
+		var audience_target: Vector3 = _event_audience_target(anchor, candidate_index, pull_count)
+		ped["mode"] = "event_visit"
+		ped["motivation"] = "social"
+		ped["goal"] = "event"
+		ped["initiative"] = "event"
+		ped["target"] = audience_target
+		ped["speed"] = _pedestrian_speed_for_identity(str(ped.get("type", "person")), ped.get("identity", {}), "event_visit")
+		ped["pause_time"] = 0.0
+		ped["meet_cooldown"] = maxf(float(ped.get("meet_cooldown", 0.0)), meetup_cooldown_seconds * 0.6)
+		_pedestrians[ped_index] = ped
+
+
+func _event_audience_score(ped: Dictionary, distance: float) -> float:
+	var score: float = maxf(0.0, 30.0 - distance)
+	var mode: String = str(ped.get("mode", "wander"))
+	if mode == "plaza" or mode == "coffee":
+		score += 18.0
+	elif mode == "shopping" or mode == "market" or mode == "evening_stroll":
+		score += 12.0
+	if str(ped.get("group_role", "solo")) == "leader":
+		score += 6.0
+	return score
+
+
+func _event_audience_target(anchor: Vector3, slot_index: int, total_count: int) -> Vector3:
+	var ring_count: int = maxi(1, total_count)
+	var angle: float = (TAU * float(slot_index)) / float(ring_count)
+	var radius: float = maxf(1.25, minf(event_spectator_radius, 1.9 + float(slot_index % 3) * 0.9))
+	return _offset_group_point(anchor, Vector3(cos(angle) * radius, 0.0, sin(angle) * radius), anchor)
+
+
+func _nearest_active_event_anchor(from_position: Vector3) -> Vector3:
+	var best_anchor := Vector3.INF
+	var best_distance: float = INF
+	for effect in _active_event_effects:
+		var parent_root: Node3D = effect.get("parent_root") as Node3D
+		if parent_root == null or not is_instance_valid(parent_root):
+			continue
+		if not String(parent_root.name).begins_with("WorldEventAnchor_"):
+			continue
+		var distance: float = parent_root.position.distance_to(from_position)
+		if distance < best_distance:
+			best_distance = distance
+			best_anchor = parent_root.position
+	return best_anchor
+
+
+func _mode_allows_event_audience(mode: String) -> bool:
+	return ["wander", "plaza", "evening_stroll", "shopping", "coffee", "errand", "market", "event_visit"].has(mode)
 
 
 func _on_population_regenerated(_summary: Dictionary) -> void:
@@ -386,6 +561,31 @@ func _compose_resident_identities(target_count: int) -> Array:
 				continue
 			seen[person_id] = true
 			residents.append(tracked)
+	if _population.has_method("get_population_snapshot"):
+		var hotspot_quota: int = maxi(0, int(round(float(target_count) * hotspot_resident_bias_share)))
+		var hotspot_candidates: Array = []
+		for candidate in _population.call("get_population_snapshot", false):
+			hotspot_candidates.append({
+				"identity": candidate,
+				"score": _crowd_visibility_score(candidate)
+			})
+		hotspot_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			var score_a: float = float(a.get("score", 0.0))
+			var score_b: float = float(b.get("score", 0.0))
+			if is_equal_approx(score_a, score_b):
+				return int(Dictionary(a.get("identity", {})).get("id", -1)) < int(Dictionary(b.get("identity", {})).get("id", -1))
+			return score_a > score_b
+		)
+		for wrapped in hotspot_candidates:
+			if residents.size() >= target_count or residents.size() >= hotspot_quota + _tracked_person_ids.size():
+				break
+			var candidate: Dictionary = Dictionary(wrapped.get("identity", {}))
+			var person_id: int = int(candidate.get("id", -1))
+			if person_id <= 0 or seen.has(person_id):
+				continue
+			seen[person_id] = true
+			residents.append(candidate)
+			_append_social_companions(candidate, residents, seen, target_count)
 	if _population.has_method("get_random_residents"):
 		var filler_count: int = maxi(target_count * 2, target_count + _tracked_person_ids.size())
 		for candidate in _population.call("get_random_residents", filler_count):
@@ -398,6 +598,45 @@ func _compose_resident_identities(target_count: int) -> Array:
 			residents.append(candidate)
 			_append_social_companions(candidate, residents, seen, target_count)
 	return residents.slice(0, mini(target_count, residents.size()))
+
+
+func _crowd_visibility_score(identity: Dictionary) -> float:
+	if identity.is_empty() or not bool(identity.get("alive", true)):
+		return -INF
+	var activity: Dictionary = _activity_for_identity(identity)
+	var mode: String = str(activity.get("mode", "home"))
+	var score: float = _rng.randf() * 6.0
+	match mode:
+		"plaza":
+			score += 160.0
+		"coffee":
+			score += 150.0
+		"shopping":
+			score += 138.0
+		"market":
+			score += 132.0
+		"evening_stroll":
+			score += 126.0
+		"errand":
+			score += 116.0
+		"wander":
+			score += 92.0
+		"school", "work", "commute":
+			score += 34.0
+		_:
+			score += 12.0
+	if bool(activity.get("shareable", false)):
+		score += 12.0
+	var venue_type: String = str(activity.get("venue_type", ""))
+	if venue_type == "coffee_shop":
+		score += 30.0
+	elif venue_type == "bookstore" or venue_type == "bakery":
+		score += 18.0
+	if not _active_event_effects.is_empty() and _mode_allows_meetup(mode):
+		score += 18.0
+	if int(identity.get("spouse_id", -1)) > 0:
+		score += 5.0
+	return score
 
 
 func _append_social_companions(identity: Dictionary, residents: Array, seen: Dictionary, target_count: int) -> void:
@@ -439,6 +678,7 @@ func _rebuild_social_group_state(residents: Array) -> void:
 
 func _apply_identity_to_pedestrian(ped: Dictionary, index: int, identity: Dictionary) -> Dictionary:
 	var group_info: Dictionary = _group_assignment_for_identity(identity)
+	var activity: Dictionary = _activity_for_identity(identity)
 	ped["identity"] = identity
 	ped["root"].set_meta("identity", identity)
 	ped["group_id"] = str(group_info.get("id", ""))
@@ -446,9 +686,16 @@ func _apply_identity_to_pedestrian(ped: Dictionary, index: int, identity: Dictio
 	ped["group_role"] = str(group_info.get("role", "solo"))
 	ped["leader_person_id"] = int(group_info.get("leader_id", int(identity.get("id", -1))))
 	ped["group_offset"] = Vector3(group_info.get("offset", Vector3.ZERO))
+	ped["mode"] = str(activity.get("mode", ped.get("mode", "wander")))
+	ped["motivation"] = str(activity.get("motivation", ped.get("motivation", "habit")))
+	ped["goal"] = str(activity.get("goal", ped.get("goal", ped.get("mode", "wander"))))
+	ped["venue_type"] = str(activity.get("venue_type", ped.get("venue_type", "")))
+	ped["initiative"] = "follow" if not group_info.is_empty() and str(group_info.get("role", "solo")) != "leader" else str(activity.get("initiative", "self"))
+	ped["initiator_person_id"] = int(group_info.get("leader_id", int(activity.get("initiator_id", int(identity.get("id", -1))))))
+	ped["speech_cooldown"] = float(ped.get("speech_cooldown", 0.0))
 	var display_name: String = str(identity.get("full_name", "Pedestrian"))
 	ped["root"].name = "Pedestrian_%02d_%s_%s" % [index, String(ped.get("type", "person")), display_name.replace(" ", "_")]
-	_refresh_identity_label(ped["root"], identity)
+	ped["label_node"] = _refresh_identity_label(ped["root"], identity, ped.get("label_node") as Label3D)
 	return ped
 
 
@@ -645,7 +892,13 @@ func _mode_for_activity(activity: Dictionary) -> String:
 
 
 func _allows_family_group_mode(mode: String) -> bool:
-	return ["home", "wander", "market", "plaza", "evening_stroll"].has(mode)
+	return ["home", "wander", "market", "plaza", "evening_stroll", "shopping", "coffee", "errand", "event_visit"].has(mode)
+
+
+func _activity_is_shareable(activity: Dictionary) -> bool:
+	if bool(activity.get("shareable", false)):
+		return true
+	return ["home", "wander", "market", "plaza", "evening_stroll", "shopping", "coffee", "errand", "event_visit"].has(_mode_for_activity(activity))
 
 
 func _activities_can_share_group(activity_a: Dictionary, activity_b: Dictionary) -> bool:
@@ -653,8 +906,7 @@ func _activities_can_share_group(activity_a: Dictionary, activity_b: Dictionary)
 	var mode_b: String = _mode_for_activity(activity_b)
 	if mode_a == mode_b:
 		return true
-	var relaxed_modes := ["home", "wander", "market", "plaza", "evening_stroll"]
-	return relaxed_modes.has(mode_a) and relaxed_modes.has(mode_b)
+	return _activity_is_shareable(activity_a) and _activity_is_shareable(activity_b)
 
 
 func _group_offsets_for_kind(group_kind: String, member_count: int) -> Array:
@@ -664,6 +916,12 @@ func _group_offsets_for_kind(group_kind: String, member_count: int) -> Array:
 			return [
 				Vector3.ZERO,
 				Vector3(0.42 * spacing, 0.0, -0.28 * spacing)
+			].slice(0, member_count)
+		"meetup":
+			return [
+				Vector3.ZERO,
+				Vector3(0.62 * spacing, 0.0, -0.24 * spacing),
+				Vector3(-0.58 * spacing, 0.0, -0.42 * spacing)
 			].slice(0, member_count)
 		"friends":
 			return [
@@ -744,14 +1002,20 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 		}, spawn)
 		if follow_target != null:
 			initial_target = follow_target
+	var label_node: Label3D = null
 	if show_identity_labels or _tracked_person_ids.has(int(identity.get("id", -1))):
-		_add_identity_label(root, identity)
+		label_node = _add_identity_label(root, identity)
 	_pedestrians.append({
 		"type": ped_type,
 		"root": root,
 		"visual": visual,
 		"identity": identity,
 		"mode": mode,
+		"motivation": str(activity.get("motivation", "habit")),
+		"goal": str(activity.get("goal", mode)),
+		"venue_type": str(activity.get("venue_type", "")),
+		"initiative": "follow" if not group_info.is_empty() and str(group_info.get("role", "solo")) != "leader" else str(activity.get("initiative", "self")),
+		"initiator_person_id": int(group_info.get("leader_id", int(activity.get("initiator_id", int(identity.get("id", -1)))))),
 		"target": initial_target,
 		"speed": _pedestrian_speed_for_identity(ped_type, identity, mode) * speed_scale,
 		"group_id": str(group_info.get("id", "")),
@@ -761,8 +1025,11 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 		"group_offset": Vector3(group_info.get("offset", Vector3.ZERO)),
 		"bob_phase": _rng.randf() * TAU,
 		"gait_time": _rng.randf() * TAU,
+		"label_node": label_node,
 		"stuck_time": 0.0,
-		"pause_time": 0.0 if str(group_info.get("role", "solo")) != "leader" and not group_info.is_empty() else _random_pause_for_actor(ped_type, mode)
+		"pause_time": 0.0 if str(group_info.get("role", "solo")) != "leader" and not group_info.is_empty() else _random_pause_for_actor(ped_type, mode),
+		"meet_cooldown": 0.0,
+		"speech_cooldown": 0.0
 	})
 
 
@@ -793,6 +1060,10 @@ func _spawn_dog(index: int, group_info: Dictionary = {}) -> void:
 		"visual": visual,
 		"identity": {},
 		"mode": str(group_info.get("group_kind", "wander")),
+		"motivation": "habit",
+		"goal": "walk",
+		"initiative": "follow" if not group_info.is_empty() else "self",
+		"initiator_person_id": int(group_info.get("leader_id", -1)),
 		"target": _pick_target_for_pedestrian({"type": DOG_TYPE}, spawn) if group_info.is_empty() else spawn,
 		"speed": _rng.randf_range(dog_walk_speed_min, dog_walk_speed_max),
 		"group_id": str(group_info.get("group_id", "")),
@@ -804,6 +1075,8 @@ func _spawn_dog(index: int, group_info: Dictionary = {}) -> void:
 		"gait_time": _rng.randf() * TAU,
 		"stuck_time": 0.0,
 		"pause_time": 0.0 if not group_info.is_empty() else _random_pause_for_actor(DOG_TYPE, "wander"),
+		"meet_cooldown": 0.0,
+		"speech_cooldown": 0.0,
 		"dog_parts": _collect_dog_parts(visual)
 	})
 
@@ -878,6 +1151,776 @@ func _pedestrian_for_leader(leader_person_id: int, group_id: String) -> Dictiona
 	return _pedestrians[index]
 
 
+func _attempt_dynamic_meetups() -> void:
+	if meetup_join_share <= 0.0 or _pedestrians.size() < 2:
+		return
+	if _frame_counter % maxi(2, crowd_update_slices * 2) != 0:
+		return
+	var meetup_candidates: Array = _gather_meetup_candidate_indices()
+	if meetup_candidates.size() < 2:
+		return
+	var activity_cache: Dictionary = {}
+	for candidate_index in meetup_candidates:
+		var ped: Dictionary = _pedestrians[int(candidate_index)]
+		activity_cache[int(candidate_index)] = _activity_descriptor_for_ped(ped)
+	for candidate_index in meetup_candidates:
+		var index: int = int(candidate_index)
+		if index < 0 or index >= _pedestrians.size():
+			continue
+		var ped: Dictionary = _pedestrians[index]
+		var partner_index: int = _find_meetup_partner(index, ped, meetup_candidates, activity_cache)
+		if partner_index < 0:
+			continue
+		_form_meetup_group(index, partner_index)
+		_rebuild_group_leader_indices()
+		return
+
+
+func _can_initiate_meetup(ped: Dictionary) -> bool:
+	if str(ped.get("type", "person")) == DOG_TYPE:
+		return false
+	if str(ped.get("group_role", "solo")) != "solo":
+		return false
+	if float(ped.get("meet_cooldown", 0.0)) > 0.0:
+		return false
+	if not _mode_allows_meetup(str(ped.get("mode", "wander"))):
+		return false
+	var root: Node3D = ped.get("root") as Node3D
+	return root != null and is_instance_valid(root)
+
+
+func _gather_meetup_candidate_indices() -> Array:
+	var candidates: Array = []
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
+		if _can_initiate_meetup(ped):
+			candidates.append(index)
+	return candidates
+
+
+func _find_meetup_partner(index: int, ped: Dictionary, candidate_indices: Array = [], activity_cache: Dictionary = {}) -> int:
+	var root: Node3D = ped.get("root") as Node3D
+	if root == null or not is_instance_valid(root):
+		return -1
+	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_meetup_candidate_indices()
+	var activity: Dictionary = activity_cache.get(index, _activity_descriptor_for_ped(ped))
+	var root_position: Vector3 = root.position
+	var radius_sq: float = meetup_join_radius * meetup_join_radius
+	var best_index: int = -1
+	var best_score: float = -INF
+	for other_index_raw in indices:
+		var other_index: int = int(other_index_raw)
+		if other_index == index or other_index < 0 or other_index >= _pedestrians.size():
+			continue
+		var other: Dictionary = _pedestrians[other_index]
+		var other_root: Node3D = other.get("root") as Node3D
+		if other_root == null or not is_instance_valid(other_root):
+			continue
+		var offset := other_root.position - root_position
+		offset.y = 0.0
+		var distance_sq: float = offset.length_squared()
+		if distance_sq > radius_sq:
+			continue
+		if not _activities_can_share_group(activity, activity_cache.get(other_index, _activity_descriptor_for_ped(other))):
+			continue
+		var distance: float = sqrt(distance_sq)
+		var score: float = (meetup_join_radius - distance) + _meeting_leader_score(other) * 0.01
+		if score > best_score:
+			best_score = score
+			best_index = other_index
+	if best_index >= 0 and _rng.randf() <= meetup_join_share:
+		return best_index
+	return -1
+
+
+func _form_meetup_group(index_a: int, index_b: int) -> void:
+	if index_a < 0 or index_b < 0 or index_a >= _pedestrians.size() or index_b >= _pedestrians.size():
+		return
+	var ped_a: Dictionary = _pedestrians[index_a]
+	var ped_b: Dictionary = _pedestrians[index_b]
+	var leader_index: int = index_a if _meeting_leader_score(ped_a) >= _meeting_leader_score(ped_b) else index_b
+	var member_index: int = index_b if leader_index == index_a else index_a
+	var leader: Dictionary = _pedestrians[leader_index]
+	var member: Dictionary = _pedestrians[member_index]
+	_dynamic_group_index += 1
+	var group_id: String = "meetup_%02d" % _dynamic_group_index
+	var formation: Array = _group_offsets_for_kind("meetup", 2)
+	var leader_identity: Dictionary = leader.get("identity", {})
+	var leader_person_id: int = int(leader_identity.get("id", -1))
+	leader["group_id"] = group_id
+	leader["group_kind"] = "meetup"
+	leader["group_role"] = "leader"
+	leader["leader_person_id"] = leader_person_id
+	leader["group_offset"] = formation[0] if not formation.is_empty() else Vector3.ZERO
+	leader["initiative"] = "initiator"
+	leader["initiator_person_id"] = leader_person_id
+	leader["meet_cooldown"] = meetup_cooldown_seconds
+	member["group_id"] = group_id
+	member["group_kind"] = "meetup"
+	member["group_role"] = "member"
+	member["leader_person_id"] = leader_person_id
+	member["group_offset"] = formation[1] if formation.size() > 1 else Vector3(0.62 * social_group_spacing, 0.0, -0.24 * social_group_spacing)
+	member["mode"] = str(leader.get("mode", member.get("mode", "wander")))
+	member["motivation"] = "social"
+	member["goal"] = str(leader.get("goal", member.get("goal", "walk")))
+	member["venue_type"] = str(leader.get("venue_type", member.get("venue_type", "")))
+	member["initiative"] = "follow"
+	member["initiator_person_id"] = leader_person_id
+	var member_root: Node3D = member.get("root") as Node3D
+	if member_root != null and is_instance_valid(member_root):
+		var follow_target: Variant = _group_follow_target(member, member_root.position)
+		if follow_target != null:
+			member["target"] = follow_target
+	member["speed"] = _group_speed_for_actor(member)
+	member["pause_time"] = 0.0
+	member["meet_cooldown"] = meetup_cooldown_seconds
+	_pedestrians[leader_index] = leader
+	_pedestrians[member_index] = member
+
+
+func _meeting_leader_score(ped: Dictionary) -> float:
+	var score: float = 0.0
+	var mode: String = str(ped.get("mode", "wander"))
+	if mode == "school" or mode == "commute" or mode == "work":
+		score += 6.0
+	elif mode == "shopping" or mode == "coffee" or mode == "errand":
+		score += 4.0
+	elif mode == "evening_stroll":
+		score += 2.0
+	var identity: Dictionary = ped.get("identity", {})
+	if not identity.is_empty():
+		score += float(int(identity.get("age", 30))) * 0.05
+	if str(ped.get("initiative", "self")) == "initiator":
+		score += 1.5
+	return score
+
+
+func _mode_allows_meetup(mode: String) -> bool:
+	return ["wander", "plaza", "evening_stroll", "shopping", "coffee", "errand", "market"].has(mode)
+
+
+func _activity_descriptor_for_ped(ped: Dictionary) -> Dictionary:
+	return {
+		"mode": str(ped.get("mode", "wander")),
+		"motivation": str(ped.get("motivation", "habit")),
+		"goal": str(ped.get("goal", "walk")),
+		"shareable": _mode_allows_meetup(str(ped.get("mode", "wander"))),
+		"venue_type": str(ped.get("venue_type", ""))
+	}
+
+
+func _update_conversations(delta: float) -> void:
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
+		ped["speech_cooldown"] = maxf(0.0, float(ped.get("speech_cooldown", 0.0)) - delta)
+		_pedestrians[index] = ped
+	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
+		var conversation: Dictionary = _active_conversations[conversation_index]
+		var lines: Array = conversation.get("lines", [])
+		if lines.is_empty():
+			_active_conversations.remove_at(conversation_index)
+			continue
+		conversation["elapsed"] = float(conversation.get("elapsed", 0.0)) + delta
+		if float(conversation.get("elapsed", 0.0)) >= float(conversation.get("line_duration", conversation_line_duration)):
+			conversation["elapsed"] = 0.0
+			conversation["line_index"] = int(conversation.get("line_index", 0)) + 1
+			if int(conversation.get("line_index", 0)) >= lines.size():
+				_active_conversations.remove_at(conversation_index)
+				continue
+		_active_conversations[conversation_index] = conversation
+	_next_conversation_delay = maxf(0.0, _next_conversation_delay - delta)
+	_player_conversation_delay = maxf(0.0, _player_conversation_delay - delta)
+	var occupied_speakers: Dictionary = _conversation_speaker_lookup()
+	var conversation_candidates: Array = _gather_conversation_candidate_indices(occupied_speakers)
+	if _active_conversations.size() < 3 and _player_conversation_delay <= 0.0:
+		var player_candidate_index: int = _find_player_conversation_candidate(conversation_candidates)
+		if player_candidate_index >= 0:
+			_start_player_conversation(player_candidate_index, false)
+			_player_conversation_delay = _rng.randf_range(player_conversation_cooldown * 0.8, player_conversation_cooldown * 1.35)
+			occupied_speakers[player_candidate_index] = true
+			conversation_candidates.erase(player_candidate_index)
+	if _next_conversation_delay > 0.0 or _active_conversations.size() >= 3:
+		return
+	var candidate_pair: Array = _find_conversation_pair(conversation_candidates)
+	if candidate_pair.size() < 2:
+		return
+	_start_conversation(int(candidate_pair[0]), int(candidate_pair[1]))
+	_next_conversation_delay = _rng.randf_range(1.8, 4.4)
+
+
+func _find_conversation_pair(candidate_indices: Array = []) -> Array:
+	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_conversation_candidate_indices(_conversation_speaker_lookup())
+	for index in indices:
+		var ped_index: int = int(index)
+		if ped_index < 0 or ped_index >= _pedestrians.size():
+			continue
+		var ped: Dictionary = _pedestrians[ped_index]
+		var partner_index: int = _find_conversation_partner(ped_index, ped, indices)
+		if partner_index >= 0:
+			return [ped_index, partner_index]
+	return []
+
+
+func _find_player_conversation_candidate(candidate_indices: Array = []) -> int:
+	if _camera == null or _active_conversations.size() >= 3:
+		return -1
+	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_conversation_candidate_indices(_conversation_speaker_lookup())
+	if indices.is_empty():
+		return -1
+	var player_position: Vector3 = _camera.global_position
+	var player_radius_sq: float = player_conversation_radius * player_conversation_radius
+	var viewport_center: Vector2 = get_viewport().get_visible_rect().size * 0.5
+	var best_index: int = -1
+	var best_score: float = -INF
+	for index in indices:
+		var ped_index: int = int(index)
+		if ped_index < 0 or ped_index >= _pedestrians.size():
+			continue
+		var ped: Dictionary = _pedestrians[ped_index]
+		var root: Node3D = ped.get("root") as Node3D
+		if root == null or not is_instance_valid(root):
+			continue
+		var root_position: Vector3 = root.global_position
+		var to_player := player_position - root_position
+		var distance_sq: float = to_player.length_squared()
+		if distance_sq > player_radius_sq:
+			continue
+		var world_anchor := root_position + Vector3(0.0, 1.2, 0.0)
+		if _camera.is_position_behind(world_anchor):
+			continue
+		var distance: float = sqrt(distance_sq)
+		var facing_bonus: float = 0.0
+		if distance_sq > 0.001:
+			var forward := -root.global_transform.basis.z
+			facing_bonus = maxf(0.0, forward.normalized().dot(to_player / distance)) * 4.0
+		var screen_point: Vector2 = _camera.unproject_position(world_anchor)
+		var center_distance: float = screen_point.distance_to(viewport_center)
+		var screen_bonus: float = maxf(0.0, 220.0 - center_distance) / 42.0
+		var score: float = maxf(0.0, 28.0 - distance * 3.2) + facing_bonus + screen_bonus
+		if str(ped.get("initiative", "self")) == "initiator":
+			score += 1.5
+		if ["plaza", "coffee", "shopping", "market", "evening_stroll", "event_visit"].has(str(ped.get("mode", "wander"))):
+			score += 2.0
+		if score > best_score:
+			best_score = score
+			best_index = ped_index
+	if best_index >= 0 and _rng.randf() <= player_conversation_share:
+		return best_index
+	return -1
+
+
+func trigger_player_conversation_for_person(person_id: int) -> bool:
+	for ped_index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[ped_index]
+		var identity: Dictionary = ped.get("identity", {})
+		if int(identity.get("id", -1)) != person_id:
+			continue
+		if not _can_start_conversation(ped_index, ped):
+			return false
+		_start_player_conversation(ped_index, true)
+		_player_conversation_delay = _rng.randf_range(player_conversation_cooldown * 0.9, player_conversation_cooldown * 1.2)
+		return true
+	return false
+
+
+func get_active_conversation_count() -> int:
+	return _active_conversations.size()
+
+
+func get_player_conversation_count() -> int:
+	var count: int = 0
+	for conversation in _active_conversations:
+		if bool(Dictionary(conversation).get("is_player", false)):
+			count += 1
+	return count
+
+
+func _ped_is_engaged_with_player(ped_index: int) -> bool:
+	return _player_conversation_speaker_lookup().has(ped_index)
+
+
+func _player_conversation_speaker_lookup() -> Dictionary:
+	return _conversation_speaker_lookup(true)
+
+
+func _face_actor_toward_player(root: Node3D, delta: float) -> void:
+	if root == null or not is_instance_valid(root) or _camera == null:
+		return
+	var to_player := _camera.global_position - root.global_position
+	to_player.y = 0.0
+	if to_player.length_squared() <= 0.001:
+		return
+	var heading: float = atan2(to_player.x, to_player.z) + deg_to_rad(model_yaw_offset_degrees)
+	root.rotation.y = lerp_angle(root.rotation.y, heading, minf(1.0, delta * turn_lerp_speed * 1.35))
+
+
+func has_text_api_config() -> bool:
+	return enable_llm_conversations and _openrouter_api_key != "" and _openrouter_request != null
+
+
+func get_api_detection_snapshot() -> Dictionary:
+	return {
+		"text": has_text_api_config(),
+		"text_env": "OPENROUTER_API_KEY"
+	}
+
+
+func _can_start_conversation(ped_index: int, ped: Dictionary) -> bool:
+	return _can_start_conversation_with_lookup(ped_index, ped, _conversation_speaker_lookup())
+
+
+func _can_start_conversation_with_lookup(ped_index: int, ped: Dictionary, occupied_speakers: Dictionary) -> bool:
+	if str(ped.get("type", "person")) == DOG_TYPE:
+		return false
+	if float(ped.get("speech_cooldown", 0.0)) > 0.0:
+		return false
+	if occupied_speakers.has(ped_index):
+		return false
+	if not _mode_supports_conversation(str(ped.get("mode", "wander"))):
+		return false
+	var root: Node3D = ped.get("root") as Node3D
+	return root != null and is_instance_valid(root)
+
+
+func _ped_is_in_conversation(ped_index: int) -> bool:
+	return _conversation_speaker_lookup().has(ped_index)
+
+
+func _conversation_speaker_lookup(player_only: bool = false) -> Dictionary:
+	var occupied: Dictionary = {}
+	for conversation in _active_conversations:
+		var conversation_dict: Dictionary = Dictionary(conversation)
+		if player_only and not bool(conversation_dict.get("is_player", false)):
+			continue
+		for speaker_index in Array(conversation_dict.get("speaker_indices", [])):
+			occupied[int(speaker_index)] = true
+	return occupied
+
+
+func _gather_conversation_candidate_indices(occupied_speakers: Dictionary = {}) -> Array:
+	var candidates: Array = []
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
+		if _can_start_conversation_with_lookup(index, ped, occupied_speakers):
+			candidates.append(index)
+	return candidates
+
+
+func _find_conversation_partner(index: int, ped: Dictionary, candidate_indices: Array = []) -> int:
+	var root: Node3D = ped.get("root") as Node3D
+	if root == null or not is_instance_valid(root):
+		return -1
+	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_conversation_candidate_indices(_conversation_speaker_lookup())
+	var root_position: Vector3 = root.position
+	var radius_sq: float = conversation_radius * conversation_radius
+	var best_index: int = -1
+	var best_score: float = -INF
+	for other_index_raw in indices:
+		var other_index: int = int(other_index_raw)
+		if other_index == index or other_index < 0 or other_index >= _pedestrians.size():
+			continue
+		var other: Dictionary = _pedestrians[other_index]
+		var other_root: Node3D = other.get("root") as Node3D
+		if other_root == null or not is_instance_valid(other_root):
+			continue
+		var offset := other_root.position - root_position
+		offset.y = 0.0
+		var distance_sq: float = offset.length_squared()
+		if distance_sq > radius_sq:
+			continue
+		var score: float = _conversation_pair_score(ped, other, sqrt(distance_sq))
+		if score > best_score:
+			best_score = score
+			best_index = other_index
+	if best_index >= 0 and _rng.randf() <= conversation_share:
+		return best_index
+	return -1
+
+
+func _conversation_pair_score(ped: Dictionary, other: Dictionary, distance: float) -> float:
+	var score: float = maxf(0.0, 16.0 - distance * 2.0)
+	var mode: String = str(ped.get("mode", "wander"))
+	var other_mode: String = str(other.get("mode", "wander"))
+	if mode == other_mode:
+		score += 10.0
+	if str(ped.get("group_id", "")) != "" and str(ped.get("group_id", "")) == str(other.get("group_id", "")):
+		score += 12.0
+	if ["plaza", "coffee", "event_visit"].has(mode):
+		score += 10.0
+	if ["plaza", "coffee", "event_visit"].has(other_mode):
+		score += 10.0
+	if str(ped.get("initiative", "self")) == "initiator":
+		score += 2.0
+	return score
+
+
+func _start_conversation(index_a: int, index_b: int) -> void:
+	if index_a < 0 or index_b < 0 or index_a >= _pedestrians.size() or index_b >= _pedestrians.size():
+		return
+	var ped_a: Dictionary = _pedestrians[index_a]
+	var ped_b: Dictionary = _pedestrians[index_b]
+	var lines: Array = _conversation_lines_for_pair(index_a, ped_a, index_b, ped_b)
+	_start_conversation_from_lines(index_a, ped_a, index_b, ped_b, lines, conversation_line_duration, false)
+
+
+func _start_player_conversation(ped_index: int, use_llm: bool = false) -> void:
+	if ped_index < 0 or ped_index >= _pedestrians.size():
+		return
+	var ped: Dictionary = _pedestrians[ped_index]
+	var lines: Array = _conversation_lines_for_player(ped_index, ped)
+	_start_conversation_from_lines(ped_index, ped, -1, {}, lines, conversation_line_duration, true, use_llm)
+
+
+func _start_conversation_from_lines(index_a: int, ped_a: Dictionary, index_b: int, ped_b: Dictionary, lines: Array, line_duration: float, is_player_conversation: bool, use_llm: bool = false) -> void:
+	if lines.is_empty():
+		return
+	var speakers: Array = [index_a]
+	if index_b >= 0:
+		speakers.append(index_b)
+	var conversation := {
+		"id": "conversation_%02d" % (_active_conversations.size() + 1 + _frame_counter % 97),
+		"speaker_indices": speakers,
+		"lines": lines,
+		"line_index": 0,
+		"elapsed": 0.0,
+		"line_duration": line_duration,
+		"is_player": is_player_conversation,
+		"llm_pending": false
+	}
+	_active_conversations.append(conversation)
+	ped_a["pause_time"] = maxf(float(ped_a.get("pause_time", 0.0)), line_duration * 0.75)
+	ped_a["speech_cooldown"] = maxf(float(ped_a.get("speech_cooldown", 0.0)), 10.0 if not is_player_conversation else player_conversation_cooldown)
+	_pedestrians[index_a] = ped_a
+	if index_b >= 0:
+		ped_b["pause_time"] = maxf(float(ped_b.get("pause_time", 0.0)), line_duration * 0.75)
+		ped_b["speech_cooldown"] = maxf(float(ped_b.get("speech_cooldown", 0.0)), 10.0)
+		_pedestrians[index_b] = ped_b
+	if is_player_conversation and use_llm:
+		var started_request: bool = _request_openrouter_player_lines(index_a, ped_a)
+		if started_request:
+			conversation["llm_pending"] = true
+			_active_conversations[_active_conversations.size() - 1] = conversation
+
+
+func _conversation_lines_for_pair(index_a: int, ped_a: Dictionary, index_b: int, ped_b: Dictionary) -> Array:
+	var identity_a: Dictionary = ped_a.get("identity", {})
+	var identity_b: Dictionary = ped_b.get("identity", {})
+	var name_b: String = str(identity_b.get("first_name", identity_b.get("full_name", "Friend"))).split(" ")[0]
+	var mode: String = str(ped_a.get("mode", ped_b.get("mode", "wander")))
+	var lines: Array[String] = []
+	match mode:
+		"coffee":
+			lines = [
+				"Want to grab a coffee, %s?" % name_b,
+				"Yeah, let's take the corner table.",
+				"I heard the square is lively tonight."
+			]
+		"shopping", "market", "errand":
+			lines = [
+				"I'm heading past the shops—coming?",
+				"Sure, I need one more thing anyway.",
+				"Let's check the bakery before it closes."
+			]
+		"event_visit":
+			lines = [
+				"Looks like something's happening over there.",
+				"Let's stay a minute and watch.",
+				"Everyone from the square is drifting over."
+			]
+		"plaza", "evening_stroll":
+			lines = [
+				"Nice evening for a walk, huh?",
+				"Yeah—let's loop through the square.",
+				"Maybe we can stop by the café after."
+			]
+		_:
+			lines = [
+				"Hey %s, where are you headed?" % name_b,
+				"Just wandering for a bit.",
+				"Come with me—there's more going on by the plaza."
+			]
+	return _sequence_lines(lines, index_a, index_b)
+
+
+func _conversation_lines_for_player(index_a: int, ped_a: Dictionary) -> Array:
+	var identity: Dictionary = ped_a.get("identity", {})
+	var first_name: String = str(identity.get("first_name", identity.get("full_name", "Neighbor"))).split(" ")[0]
+	var mode: String = str(ped_a.get("mode", "wander"))
+	var lines: Array[String] = []
+	match mode:
+		"coffee":
+			lines = [
+				"Hey—want to check out the café?",
+				"They've actually got open tables right now.",
+				"I'm %s, by the way." % first_name
+			]
+		"shopping", "market", "errand":
+			lines = [
+				"You made it just before the stalls close.",
+				"Best bread stand is halfway down this block.",
+				"If you're browsing, it's a good day for it."
+			]
+		"event_visit":
+			lines = [
+				"You here for the little crowd gathering too?",
+				"Something interesting always starts in the square.",
+				"Feels like the whole block noticed."
+			]
+		"plaza", "evening_stroll":
+			lines = [
+				"Nice timing—this street's best around now.",
+				"If you keep going, the plaza opens up ahead.",
+				"People tend to linger there when it's lively."
+			]
+		_:
+			lines = [
+				"Hey there.",
+				"You look new to this stretch of town.",
+				"The plaza's the busiest spot if you're looking for something happening."
+			]
+	return _sequence_lines(lines, index_a, -1)
+
+
+func _sequence_lines(lines: Array[String], index_a: int, index_b: int) -> Array:
+	var sequence: Array = []
+	for line_index in range(lines.size()):
+		var speaker_index: int = index_a
+		if index_b >= 0 and line_index % 2 == 1:
+			speaker_index = index_b
+		sequence.append({
+			"speaker_index": speaker_index,
+			"text": lines[line_index]
+		})
+	return sequence
+
+
+func _mode_supports_conversation(mode: String) -> bool:
+	return ["wander", "plaza", "coffee", "shopping", "market", "errand", "evening_stroll", "event_visit"].has(mode)
+
+
+func _request_openrouter_player_lines(ped_index: int, ped: Dictionary) -> bool:
+	if not enable_llm_conversations or _openrouter_request == null or _openrouter_request_in_flight:
+		return false
+	if _openrouter_api_key == "":
+		push_warning("OpenRouter conversation generation skipped: %s missing" % OPENROUTER_ENV_KEY)
+		return false
+		
+	var identity: Dictionary = ped.get("identity", {})
+	var prompt: String = "Write exactly 3 short lines of ambient NPC dialogue spoken by one city pedestrian to a nearby player in a simulation game. Keep each line under 70 characters. Tone: natural, brief, street-level, no meta commentary. Mode: %s. Speaker name: %s. Return exactly 3 plain text lines, one line per line, with no numbering, no bullets, no JSON, and no markdown." % [
+		str(ped.get("mode", "wander")),
+		str(identity.get("first_name", identity.get("full_name", "Neighbor")))
+	]
+	var payload := {
+		"model": openrouter_model,
+		"messages": [
+			{
+				"role": "system",
+				"content": "You write short NPC barks for a city sim. Output only the dialogue lines, nothing else."
+			},
+			{
+				"role": "user",
+				"content": prompt
+			}
+		],
+		"temperature": 0.9,
+		"max_tokens": openrouter_max_tokens
+	}
+	var headers := [
+		"Authorization: Bearer %s" % _openrouter_api_key,
+		"Content-Type: application/json",
+		"HTTP-Referer: https://openclaw.local/godot-city-grid",
+		"X-Title: godot-city-grid"
+	]
+	_openrouter_request_in_flight = true
+	_openrouter_request.set_meta("conversation_ped_index", ped_index)
+	print("OpenRouter conversation request -> ped %d model %s" % [ped_index, openrouter_model])
+	var err: int = _openrouter_request.request(
+		OPENROUTER_CHAT_URL,
+		headers,
+		HTTPClient.METHOD_POST,
+		JSON.stringify(payload)
+	)
+	if err != OK:
+		_openrouter_request_in_flight = false
+		push_warning("OpenRouter conversation request failed to start: %s" % err)
+		return false
+	return true
+
+
+func _on_openrouter_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	_openrouter_request_in_flight = false
+	print("OpenRouter conversation response -> result %d status %d" % [result, response_code])
+	var ped_index: int = int(_openrouter_request.get_meta("conversation_ped_index", -1))
+	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
+		_finalize_openrouter_player_lines(ped_index, [], "http_error")
+		push_warning("OpenRouter conversation response failed: result=%d status=%d body=%s" % [result, response_code, body.get_string_from_utf8().left(240)])
+		return
+	if ped_index < 0 or ped_index >= _pedestrians.size():
+		print("OpenRouter generated -> ped %d: ZERO_MSG (ped gone)" % ped_index)
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		_finalize_openrouter_player_lines(ped_index, [], "bad_body")
+		push_warning("OpenRouter conversation response was not a dictionary: %s" % body.get_string_from_utf8().left(240))
+		return
+	var choices: Array = Dictionary(parsed).get("choices", [])
+	if choices.is_empty():
+		_finalize_openrouter_player_lines(ped_index, [], "no_choices")
+		push_warning("OpenRouter conversation response had no choices")
+		return
+	var choice: Dictionary = Dictionary(choices[0])
+	var message: Dictionary = Dictionary(choice.get("message", {}))
+	var finish_reason: String = str(choice.get("finish_reason", ""))
+	var content_preview: String = _extract_choice_text(choice)
+	var lines: Array[String] = _extract_generated_lines_from_choice(choice)
+	if lines.is_empty():
+		var empty_status: String = "length_exhausted" if finish_reason == "length" else "zero_msg"
+		_finalize_openrouter_player_lines(ped_index, [], empty_status)
+		push_warning("OpenRouter raw content preview: %s" % content_preview.left(240))
+		push_warning("OpenRouter choice preview: %s" % JSON.stringify({
+			"finish_reason": finish_reason,
+			"message": message,
+			"text": choice.get("text", null)
+		}).left(320))
+		if finish_reason == "length":
+			push_warning("OpenRouter hit max_tokens before producing visible dialogue; using local fallback lines")
+		else:
+			push_warning("OpenRouter conversation content was not parseable as lines")
+		return
+	_finalize_openrouter_player_lines(ped_index, lines, "ok")
+
+
+func _finalize_openrouter_player_lines(ped_index: int, lines: Array[String], status: String) -> void:
+	if lines.is_empty():
+		print("OpenRouter generated -> ped %d: ZERO_MSG (%s)" % [ped_index, status])
+	else:
+		print("OpenRouter generated -> ped %d: %s" % [ped_index, _join_log_lines(lines)])
+	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
+		var conversation: Dictionary = _active_conversations[conversation_index]
+		if not bool(conversation.get("is_player", false)):
+			continue
+		var speakers: Array = conversation.get("speaker_indices", [])
+		if speakers.is_empty() or int(speakers[0]) != ped_index:
+			continue
+		conversation["llm_pending"] = false
+		if not lines.is_empty():
+			conversation["lines"] = _sequence_lines(lines, ped_index, -1)
+			conversation["line_index"] = 0
+			conversation["elapsed"] = 0.0
+		_active_conversations[conversation_index] = conversation
+		break
+
+
+func _join_log_lines(lines: Array[String]) -> String:
+	var combined: String = ""
+	for index in range(lines.size()):
+		if index > 0:
+			combined += " | "
+		combined += str(lines[index])
+	return combined
+
+
+func _extract_generated_lines_from_choice(choice: Dictionary) -> Array[String]:
+	var message: Dictionary = Dictionary(choice.get("message", {}))
+	var content_text: String = _extract_choice_text(choice).strip_edges()
+	if content_text == "":
+		return []
+	var generated: Variant = null
+	var json_candidate: String = _extract_json_array_candidate(content_text)
+	if json_candidate != "":
+		generated = JSON.parse_string(json_candidate)
+	var lines: Array[String] = []
+	if typeof(generated) == TYPE_ARRAY:
+		for entry in generated:
+			var text: String = str(entry).strip_edges()
+			if text != "":
+				lines.append(text)
+			if lines.size() >= 3:
+				return lines
+	var refusal_value: Variant = message.get("refusal", false)
+	if not message.is_empty() and typeof(refusal_value) == TYPE_BOOL and refusal_value:
+		return []
+	return _fallback_generated_lines(content_text)
+
+
+func _extract_choice_text(choice: Dictionary) -> String:
+	var message: Dictionary = Dictionary(choice.get("message", {}))
+	var content_text: String = _message_content_to_text(message.get("content", null)).strip_edges()
+	if content_text != "":
+		return content_text
+	var text_text: String = _message_content_to_text(choice.get("text", null)).strip_edges()
+	if text_text != "":
+		return text_text
+	return _message_content_to_text(message.get("reasoning", null)).strip_edges()
+
+
+func _message_content_to_text(content: Variant) -> String:
+	match typeof(content):
+		TYPE_NIL:
+			return ""
+		TYPE_STRING:
+			return str(content)
+		TYPE_ARRAY:
+			var chunks: Array[String] = []
+			for entry in content:
+				if typeof(entry) == TYPE_NIL:
+					continue
+				if typeof(entry) == TYPE_DICTIONARY:
+					var entry_dict: Dictionary = entry
+					var text_value: Variant = entry_dict.get("text", entry_dict.get("content", ""))
+					if typeof(text_value) == TYPE_NIL:
+						continue
+					if typeof(text_value) == TYPE_DICTIONARY:
+						var nested: Variant = Dictionary(text_value).get("value", Dictionary(text_value).get("text", ""))
+						if typeof(nested) != TYPE_NIL:
+							chunks.append(str(nested).strip_edges())
+					else:
+						chunks.append(str(text_value).strip_edges())
+				else:
+					chunks.append(str(entry).strip_edges())
+			return "\n".join(chunks).strip_edges()
+		_:
+			return "" if typeof(content) == TYPE_NIL else str(content)
+
+
+func _extract_json_array_candidate(content_text: String) -> String:
+	var trimmed: String = content_text.strip_edges()
+	if trimmed == "":
+		return ""
+	if trimmed.begins_with("```"):
+		var lines: PackedStringArray = trimmed.split("\n")
+		if lines.size() >= 3 and String(lines[lines.size() - 1]).strip_edges() == "```":
+			lines.remove_at(0)
+			lines.remove_at(lines.size() - 1)
+			trimmed = "\n".join(lines).strip_edges()
+	if trimmed.begins_with("[") and trimmed.ends_with("]"):
+		return trimmed
+	var start: int = trimmed.find("[")
+	var ending: int = trimmed.rfind("]")
+	if start >= 0 and ending > start:
+		return trimmed.substr(start, ending - start + 1)
+	return ""
+
+
+func _fallback_generated_lines(content_text: String) -> Array[String]:
+	var cleaned: String = content_text.replace("```json", "").replace("```", "").strip_edges()
+	var lines: Array[String] = []
+	for raw_line in cleaned.split("\n"):
+		var line: String = String(raw_line).strip_edges()
+		if line == "":
+			continue
+		line = line.trim_prefix("- ")
+		line = line.trim_prefix("* ")
+		if line.length() >= 3 and line[0].is_valid_int() and [".", ")", ":", "-"].has(line.substr(1, 1)):
+			line = line.substr(2).strip_edges()
+		line = line.strip_edges()
+		if line != "":
+			lines.append(line)
+		if lines.size() >= 3:
+			break
+	return lines
+
+
 func _load_optional_scene(asset_path: String) -> PackedScene:
 	if _optional_scene_cache.has(asset_path):
 		return _optional_scene_cache[asset_path]
@@ -913,11 +1956,10 @@ func _has_ready_import(asset_path: String) -> bool:
 	return imported_path != "" and FileAccess.file_exists(imported_path)
 
 
-func _add_identity_label(root: Node3D, identity: Dictionary) -> void:
+func _add_identity_label(root: Node3D, identity: Dictionary) -> Label3D:
 	var existing := root.get_node_or_null("IdentityLabel") as Label3D
 	if existing != null:
-		_refresh_identity_label(root, identity)
-		return
+		return _refresh_identity_label(root, identity, existing)
 	var label := Label3D.new()
 	label.name = "IdentityLabel"
 	label.position = Vector3(0.0, 2.05, 0.0)
@@ -925,25 +1967,25 @@ func _add_identity_label(root: Node3D, identity: Dictionary) -> void:
 	label.pixel_size = 0.0028
 	label.modulate = Color(1.0, 1.0, 1.0, 0.82)
 	root.add_child(label)
-	_refresh_identity_label(root, identity)
+	return _refresh_identity_label(root, identity, label)
 
 
-func _refresh_identity_label(root: Node3D, identity: Dictionary) -> void:
-	var label := root.get_node_or_null("IdentityLabel") as Label3D
+func _refresh_identity_label(root: Node3D, identity: Dictionary, label_override: Label3D = null) -> Label3D:
+	var label := label_override if label_override != null else root.get_node_or_null("IdentityLabel") as Label3D
 	if not _should_show_identity_label(identity):
 		if label != null:
 			label.queue_free()
-		return
+		return null
 	if identity.is_empty():
 		if label != null:
 			label.text = "Resident"
-		return
+		return label
 	if label == null:
-		_add_identity_label(root, identity)
-		return
+		return _add_identity_label(root, identity)
 	label.text = String(identity.get("full_name", "Resident"))
 	label.modulate = Color(1.0, 0.96, 0.74, 0.94) if _tracked_person_ids.has(int(identity.get("id", -1))) else Color(1.0, 1.0, 1.0, 0.82)
 	label.visible = _is_label_in_range(root, identity)
+	return label
 
 
 func _should_show_identity_label(identity: Dictionary) -> bool:
@@ -965,23 +2007,36 @@ func _is_label_in_range(root: Node3D, identity: Dictionary) -> bool:
 		return false
 	var anchor: Vector3 = root.global_position if root != null else _spawn_position_for_identity(identity)
 	var max_distance: float = overlook_label_distance if _camera.has_method("get_view_mode") and _camera.call("get_view_mode") == "overlook" else player_label_distance
-	return _camera.global_position.distance_to(anchor) <= max_distance
+	return _camera.global_position.distance_squared_to(anchor) <= max_distance * max_distance
 
 
 func _update_label_visibility() -> void:
 	if not show_identity_labels and _camera == null and _tracked_person_ids.is_empty():
 		return
-	for ped in _pedestrians:
+	if not show_identity_labels and _camera == null:
+		_resolve_camera()
+	var camera_position: Vector3 = _camera.global_position if _camera != null else Vector3.ZERO
+	var max_distance: float = overlook_label_distance if _camera != null and _camera.has_method("get_view_mode") and _camera.call("get_view_mode") == "overlook" else player_label_distance
+	var max_distance_sq: float = max_distance * max_distance
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
 		var root: Node3D = ped.get("root") as Node3D
 		var identity: Dictionary = ped.get("identity", {})
 		if root == null or identity.is_empty():
 			continue
-		var label := root.get_node_or_null("IdentityLabel") as Label3D
-		if label == null and (show_identity_labels or _tracked_person_ids.has(int(identity.get("id", -1))) or _is_label_in_range(root, identity)):
-			_add_identity_label(root, identity)
-			label = root.get_node_or_null("IdentityLabel") as Label3D
+		var label := ped.get("label_node") as Label3D
+		if label != null and not is_instance_valid(label):
+			label = null
+		var tracked: bool = _tracked_person_ids.has(int(identity.get("id", -1)))
+		var in_range: bool = show_identity_labels or tracked
+		if not in_range and _camera != null:
+			in_range = camera_position.distance_squared_to(root.global_position) <= max_distance_sq
+		if label == null and in_range:
+			label = _add_identity_label(root, identity)
+			ped["label_node"] = label
+			_pedestrians[index] = ped
 		if label != null:
-			label.visible = _is_label_in_range(root, identity)
+			label.visible = in_range
 
 
 func _person_type_for_identity(identity: Dictionary) -> int:
@@ -1017,11 +2072,16 @@ func _pick_target_for_pedestrian(ped: Dictionary, from_position: Vector3) -> Vec
 			var activity: Dictionary = _population.call("get_person_activity", int(identity.get("id", -1)))
 			if not activity.is_empty():
 				var mode: String = str(activity.get("mode", "wander"))
-				if mode == "plaza" or mode == "evening_stroll":
+				if mode == "plaza" or mode == "evening_stroll" or mode == "event_visit":
 					preferred_walk_kind = "square"
 				var directed_target: Vector3 = activity.get("target", from_position)
 				if Vector2(directed_target.x - from_position.x, directed_target.z - from_position.z).length() >= 1.2:
 					return directed_target
+	if str(ped.get("mode", "wander")) == "event_visit":
+		var event_anchor: Vector3 = _nearest_active_event_anchor(from_position)
+		if event_anchor != Vector3.INF:
+			preferred_walk_kind = "square"
+			return _offset_group_point(event_anchor, Vector3(_rng.randf_range(-event_spectator_radius, event_spectator_radius), 0.0, _rng.randf_range(-event_spectator_radius, event_spectator_radius)), from_position)
 	if _city == null or not _city.has_method("get_random_walk_point"):
 		return from_position
 	for _attempt in range(12):
@@ -1045,8 +2105,16 @@ func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mo
 			base_speed *= 1.18
 		"school":
 			base_speed *= 1.05
+		"errand":
+			base_speed *= 1.00
+		"shopping":
+			base_speed *= 0.90
+		"coffee":
+			base_speed *= 0.82
 		"market":
 			base_speed *= 0.94
+		"event_visit":
+			base_speed *= 0.74
 		"plaza":
 			base_speed *= 0.86
 		"evening_stroll":
@@ -1062,8 +2130,16 @@ func _random_pause_for_actor(actor_type: String, mode: String = "wander") -> flo
 	match mode:
 		"commute", "school":
 			return _rng.randf_range(0.0, 0.25) if _rng.randf() < 0.18 else 0.0
+		"errand":
+			return _rng.randf_range(0.2, 0.9) if _rng.randf() < 0.34 else 0.0
+		"shopping":
+			return _rng.randf_range(0.5, 1.4) if _rng.randf() < 0.52 else 0.0
+		"coffee":
+			return _rng.randf_range(0.6, 1.8) if _rng.randf() < 0.58 else 0.0
 		"market":
 			return _rng.randf_range(0.3, 1.1) if _rng.randf() < 0.40 else 0.0
+		"event_visit":
+			return _rng.randf_range(0.8, 2.2) if _rng.randf() < 0.72 else 0.0
 		"plaza":
 			return _rng.randf_range(0.5, 1.7) if _rng.randf() < 0.56 else 0.0
 		"evening_stroll":

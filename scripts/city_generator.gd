@@ -142,8 +142,8 @@ func generate_city() -> void:
 		_setup_foliage_assets()
 	_ensure_runtime_seed()
 	_rng.seed = seed_value
-	_main_avenue_x = maxi(1, int(grid_size.x / 2))
-	_signature_cross_z = maxi(1, int(grid_size.y / 2))
+	_main_avenue_x = _pick_city_axis_index(grid_size.x, seed_value * 17 + 5)
+	_signature_cross_z = _pick_city_axis_index(grid_size.y, seed_value * 31 + 11)
 	_setup_noise()
 	_compute_street_heights()
 	_compute_city_base_height()
@@ -173,6 +173,18 @@ func _ensure_runtime_seed() -> void:
 	seed_value = int(abs((ticks ^ unix_time ^ int(get_instance_id())) % 2147483647))
 	if seed_value == 0:
 		seed_value = 1
+
+
+func _pick_city_axis_index(span: int, salt: int) -> int:
+	if span <= 2:
+		return maxi(1, int(span / 2))
+	var min_index: int = 1
+	var max_index: int = span - 1
+	if span >= 6:
+		var edge_margin: int = maxi(1, int(floor(float(span) * 0.2)))
+		min_index = mini(max_index, edge_margin)
+		max_index = maxi(min_index, span - edge_margin)
+	return min_index + _positive_modulo(salt, max_index - min_index + 1)
 
 func _setup_noise() -> void:
 	_terrain_noise = FastNoiseLite.new()

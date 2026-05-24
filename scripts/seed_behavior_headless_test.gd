@@ -6,6 +6,7 @@ const PedestrianCrowd = preload("res://scripts/pedestrian_crowd.gd")
 
 func _init() -> void:
 	_test_runtime_random_seed()
+	_test_runtime_random_layout_variation()
 	_test_fixed_seed_reproducibility()
 	_test_multi_seed_smoke_pass()
 	print("seed_behavior_headless_test: ok")
@@ -20,6 +21,21 @@ func _test_runtime_random_seed() -> void:
 	assert(int(city.seed_value) != 0)
 	assert(city.get_child_count() == 1)
 	city.free()
+
+
+func _test_runtime_random_layout_variation() -> void:
+	var city_a := CityGenerator.new()
+	city_a.regenerate_on_ready = false
+	city_a.seed_value = 0
+	city_a.generate_city()
+	var city_b := CityGenerator.new()
+	city_b.regenerate_on_ready = false
+	city_b.seed_value = 0
+	city_b.generate_city()
+	assert(int(city_a.seed_value) != int(city_b.seed_value))
+	assert(_city_signature(city_a) != _city_signature(city_b))
+	city_a.free()
+	city_b.free()
 
 
 func _test_fixed_seed_reproducibility() -> void:

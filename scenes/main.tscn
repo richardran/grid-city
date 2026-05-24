@@ -58,13 +58,15 @@ script = ExtResource("3_crowd")
 city_path = NodePath("../City")
 population_path = NodePath("../Population")
 camera_path = NodePath("../Camera3D")
-min_pedestrians = 42
-max_pedestrians = 68
-density_per_block = 0.62
+min_pedestrians = 56
+max_pedestrians = 88
+density_per_block = 0.76
 show_identity_labels = false
 max_active_event_effects = 24
 crowd_update_slices = 3
-max_detailed_pedestrians = 12
+max_detailed_pedestrians = 14
+hotspot_resident_bias_share = 0.68
+event_spectator_pull_count = 8
 
 [node name="Camera3D" type="Camera3D" parent="."]
 position = Vector3(0, 2, 0)
@@ -115,7 +117,7 @@ theme_override_constants/margin_bottom = 12
 [node name="VBox" type="VBoxContainer" parent="PopulationUI/Panel/Margin"]
 
 [node name="Summary" type="RichTextLabel" parent="PopulationUI/Panel/Margin/VBox"]
-custom_minimum_size = Vector2(0, 110)
+custom_minimum_size = Vector2(0, 150)
 bbcode_enabled = true
 fit_content = true
 scroll_active = false
@@ -127,9 +129,11 @@ columns = 2
 text = "Pause"
 
 [node name="CycleSpeed" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+visible = false
 text = "Speed"
 
 [node name="Advance6Hours" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+visible = false
 text = "+6 hours"
 
 [node name="AdvanceYear" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
@@ -142,21 +146,25 @@ text = "Next resident"
 text = "Next household"
 
 [node name="JumpToSelection" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+visible = false
 text = "Jump camera"
 
 [node name="ShowPopulation" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
-text = "Residents"
+text = "View"
 
 [node name="ShowHouseholds" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+visible = false
 text = "Households"
 
 [node name="PrevPage" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
 text = "Prev page"
 
 [node name="NextPage" type="Button" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+visible = false
 text = "Next page"
 
 [node name="Spacer" type="Control" parent="PopulationUI/Panel/Margin/VBox/Controls"]
+visible = false
 custom_minimum_size = Vector2(0, 0)
 
 [node name="Selection" type="RichTextLabel" parent="PopulationUI/Panel/Margin/VBox"]

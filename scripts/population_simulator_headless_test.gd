@@ -34,6 +34,9 @@ func _init() -> void:
 	var activity_before: Dictionary = sim.get_person_activity(int(resident.get("id", -1)))
 	assert(not activity_before.is_empty())
 	assert(String(activity_before.get("mode", "")).length() > 0)
+	assert(String(activity_before.get("motivation", "")).length() > 0)
+	assert(String(activity_before.get("goal", "")).length() > 0)
+	assert(int(activity_before.get("initiator_id", -1)) == int(resident.get("id", -1)))
 	var bonds: Array = sim.get_social_bonds(int(resident.get("id", -1)), 4)
 	assert(not bonds.is_empty())
 	var married_found: bool = false
@@ -65,7 +68,7 @@ func _init() -> void:
 	assert(not activity_after.is_empty())
 	sim.advance_hours(8.5)
 	var evening_activity: Dictionary = sim.get_person_activity(int(resident.get("id", -1)))
-	assert(["plaza", "wander", "evening_stroll", "home"].has(String(evening_activity.get("mode", ""))))
+	assert(["plaza", "wander", "evening_stroll", "home", "shopping", "coffee", "errand"].has(String(evening_activity.get("mode", ""))))
 	var mixed_type_match_score: int = sim.call("_marriage_match_score", {
 		"id": 9001,
 		"gender": "male",

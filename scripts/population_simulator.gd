@@ -373,41 +373,90 @@ func get_person_activity(person_id: int) -> Dictionary:
 		return {}
 	var routine_seed: int = person_id * 17 + _current_year * 3 + _current_day_of_year * 11
 	var routine_roll: int = _positive_modulo(routine_seed, 100)
-	var mode: String = "home"
 	var target: Vector3 = Vector3(person.get("home_entry", Vector3.ZERO))
 	var hour: float = _current_hour
 	var age: int = int(person.get("age", 0))
 	var work_building_id: Variant = person.get("work_building_id", -1)
+	var walk_habit: bool = _has_evening_walk_habit(person_id, person)
 	if hour >= 7.25 and hour < 9.0 and str(work_building_id) != "-1" and routine_roll < 72:
-		mode = "commute"
 		target = _pick_promenade_target_near(Vector3(person.get("work_entry", target)), person_id, 9.0)
+		return _make_activity(person, person_id, "commute", target, "goal", "work", false)
 	elif age < 18 and hour >= 7.5 and hour < 15.5 and str(work_building_id) != "-1":
-		mode = "school"
 		target = Vector3(person.get("work_entry", target))
-		if hour >= 11.5 and hour <= 13.5 and routine_roll < 34:
-			mode = "market"
-			target = _pick_destination_for_person(person, ["plaza", "mixed_use", "civic_landmark"])
+		if hour >= 11.5 and hour <= 13.5 and routine_roll < 18:
+			var student_break := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], ["bakery", "coffee_shop"])
+			return _make_activity(person, person_id, "errand", _point_for_destination_slot(student_break, person_id, target), "errand", "snack", true, str(student_break.get("venue_type", "")))
+		return _make_activity(person, person_id, "school", target, "goal", "school", false)
 	elif hour >= 8.0 and hour < 17.0 and str(work_building_id) != "-1":
-		mode = "work"
 		target = Vector3(person.get("work_entry", target))
-		if hour >= 11.5 and hour <= 14.5 and routine_roll < 42:
-			mode = "market"
-			target = _pick_destination_for_person(person, ["plaza", "mixed_use", "civic_landmark"])
+		if hour >= 11.25 and hour <= 14.5:
+			if routine_roll < 18:
+				var coffee_slot := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], ["coffee_shop"])
+				return _make_activity(person, person_id, "coffee", _point_for_destination_slot(coffee_slot, person_id, target), "goal", "coffee", true, str(coffee_slot.get("venue_type", "coffee_shop")))
+			elif routine_roll < 44:
+				var lunch_errand := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], _shopping_venue_preferences(person))
+				return _make_activity(person, person_id, "shopping", _point_for_destination_slot(lunch_errand, person_id, target), "errand", "shopping", true, str(lunch_errand.get("venue_type", "")))
+		return _make_activity(person, person_id, "work", target, "goal", "work", false)
+	elif hour >= 9.0 and hour < 16.5 and routine_roll < 24:
+		var errand_slot := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], _shopping_venue_preferences(person))
+		return _make_activity(person, person_id, "errand", _point_for_destination_slot(errand_slot, person_id, target), "errand", "shopping", true, str(errand_slot.get("venue_type", "")))
 	elif hour >= 17.0 and hour < 20.75:
-		if routine_roll < 60:
-			mode = "plaza"
-			target = _pick_destination_for_person(person, ["plaza", "mixed_use", "civic_landmark"])
+		if routine_roll < 22:
+			var coffee_evening := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], ["coffee_shop"])
+			return _make_activity(person, person_id, "coffee", _point_for_destination_slot(coffee_evening, person_id, target), "goal", "coffee", true, str(coffee_evening.get("venue_type", "coffee_shop")))
+		elif routine_roll < 52:
+			var shopping_slot := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], _shopping_venue_preferences(person))
+			return _make_activity(person, person_id, "shopping", _point_for_destination_slot(shopping_slot, person_id, target), "goal", "shopping", true, str(shopping_slot.get("venue_type", "")))
+		elif walk_habit or routine_roll < 80:
+			return _make_activity(person, person_id, "evening_stroll", _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0), "habit", "walk", true)
 		else:
-			mode = "wander"
-			target = _random_walk_anchor_near(Vector3(person.get("home_entry", target)), 16.0 if age < 18 else 12.5)
-	elif hour >= 20.75 and hour < 22.5 and routine_roll < 28:
-		mode = "evening_stroll"
-		target = _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0)
+			return _make_activity(person, person_id, "wander", _random_walk_anchor_near(Vector3(person.get("home_entry", target)), 16.0 if age < 18 else 12.5), "habit", "air", true)
+	elif hour >= 20.75 and hour < 22.5 and (walk_habit or routine_roll < 36):
+		return _make_activity(person, person_id, "evening_stroll", _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0), "habit", "walk", true)
+	return _make_activity(person, person_id, "home", target, "habit", "home", false)
+
+
+func _make_activity(person: Dictionary, person_id: int, mode: String, target: Vector3, motivation: String, goal: String, shareable: bool, venue_type: String = "") -> Dictionary:
+	var display_mode: String = mode.replace("_", " ")
 	return {
 		"mode": mode,
 		"target": target,
-		"label": "%s → %s" % [person.get("full_name", "Resident"), mode]
+		"motivation": motivation,
+		"goal": goal,
+		"shareable": shareable,
+		"initiative": "self",
+		"initiator_id": person_id,
+		"venue_type": venue_type,
+		"label": "%s → %s" % [person.get("full_name", "Resident"), display_mode]
 	}
+
+
+func _has_evening_walk_habit(person_id: int, person: Dictionary) -> bool:
+	var threshold: int = 28
+	var age: int = int(person.get("age", 30))
+	if age >= 18:
+		threshold += 10
+	if age >= 62:
+		threshold += 8
+	if int(person.get("spouse_id", -1)) > 0:
+		threshold += 7
+	if int(person.get("household_id", -1)) > 0:
+		threshold += _positive_modulo(int(person.get("household_id", -1)) * 3, 6)
+	if str(person.get("occupation", "")).begins_with("retired"):
+		threshold += 10
+	return _positive_modulo(person_id * 29 + age * 5 + int(person.get("household_id", -1)) * 11, 100) < threshold
+
+
+func _shopping_venue_preferences(person: Dictionary) -> Array:
+	var occupation: String = str(person.get("occupation", ""))
+	var age: int = int(person.get("age", 30))
+	if age < 18:
+		return ["bakery", "coffee_shop", "bookstore"]
+	if occupation.contains("book") or occupation.contains("teacher") or occupation.contains("developer") or occupation.contains("designer") or occupation.contains("student"):
+		return ["bookstore", "coffee_shop", "bakery"]
+	if occupation.contains("baker") or occupation.contains("cook"):
+		return ["bakery", "coffee_shop", "bookstore"]
+	return ["coffee_shop", "bookstore", "bakery"]
 
 
 func get_resident_anchor(person_id: int, anchor_kind: String = "home") -> Vector3:
@@ -1261,18 +1310,30 @@ func _pick_promenade_target_near(origin: Vector3, seed_value_local: int, radius:
 	return Vector3(candidates[_positive_modulo(seed_value_local * 37 + _current_day_of_year * 13, candidates.size())])
 
 
-func _pick_destination_for_person(person: Dictionary, preferred_kinds: Array) -> Vector3:
+func _pick_destination_for_person(person: Dictionary, preferred_kinds: Array, preferred_venues: Array = []) -> Vector3:
+	var slot: Dictionary = _pick_destination_slot_for_person(person, preferred_kinds, preferred_venues)
+	var home_entry := Vector3(person.get("home_entry", Vector3.ZERO))
+	return _point_for_destination_slot(slot, int(person.get("id", -1)), home_entry)
+
+
+func _pick_destination_slot_for_person(person: Dictionary, preferred_kinds: Array, preferred_venues: Array = []) -> Dictionary:
 	var home_entry := Vector3(person.get("home_entry", Vector3.ZERO))
 	var candidates: Array = []
 	for slot in _building_slots:
 		if not preferred_kinds.has(str(slot.get("kind", ""))):
 			continue
+		if not preferred_venues.is_empty():
+			var venue_type: String = str(slot.get("venue_type", ""))
+			if venue_type != "" and not preferred_venues.has(venue_type):
+				continue
 		candidates.append(slot)
 	if candidates.is_empty():
-		return _random_walk_anchor_near(home_entry, 16.0)
+		return {}
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		var a_venue: String = str(a.get("venue_type", ""))
 		var b_venue: String = str(b.get("venue_type", ""))
+		if not preferred_venues.is_empty() and (preferred_venues.has(a_venue) != preferred_venues.has(b_venue)):
+			return preferred_venues.has(a_venue)
 		if (a_venue != "") != (b_venue != ""):
 			return a_venue != ""
 		var a_point: Vector3 = _representative_destination_point(a, home_entry)
@@ -1281,8 +1342,13 @@ func _pick_destination_for_person(person: Dictionary, preferred_kinds: Array) ->
 	)
 	var choice_pool: Array = candidates.slice(0, mini(8, candidates.size()))
 	var choice_index: int = _positive_modulo(int(person.get("id", -1)) * 19 + _current_day_of_year * 7 + _current_year, choice_pool.size())
-	var choice: Dictionary = choice_pool[choice_index]
-	return _destination_point_for_slot(choice, int(person.get("id", -1)), home_entry)
+	return Dictionary(choice_pool[choice_index])
+
+
+func _point_for_destination_slot(slot: Dictionary, person_id: int, fallback: Vector3) -> Vector3:
+	if slot.is_empty():
+		return _random_walk_anchor_near(fallback, 16.0)
+	return _destination_point_for_slot(slot, person_id, fallback)
 
 
 func _representative_destination_point(slot: Dictionary, fallback: Vector3) -> Vector3:

@@ -47,6 +47,9 @@ func _init() -> void:
 	assert(list_label != null)
 	assert(show_population_button != null)
 	assert(show_households_button != null)
+	assert(ui.has_method("get_chat_box_count"))
+	assert(int(ui.call("get_chat_box_count")) == 3)
+	assert(int(ui.call("get_visible_chat_box_count")) == 0)
 
 	var selection_before := (ui.get_node("Panel/Margin/VBox/Selection") as RichTextLabel).text
 	ui.call("_on_next_resident")

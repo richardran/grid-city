@@ -40,7 +40,6 @@ func _init() -> void:
 	var camera := Camera3D.new()
 	camera.name = "Camera3D"
 	camera.position = Vector3(0.0, 44.0, 36.0)
-	camera.look_at(Vector3.ZERO, Vector3.UP)
 	root.add_child(camera)
 	camera.current = true
 
@@ -53,9 +52,11 @@ func _init() -> void:
 	root.add_child(ui)
 
 	await process_frame
+	camera.look_at(Vector3.ZERO, Vector3.UP)
 	await process_frame
 
 	var selected_id: int = -1
+	var selected_focus := Vector3.ZERO
 	for child in crowd.get_children():
 		if child is Node3D:
 			var identity: Dictionary = (child as Node3D).get_meta("identity", {})
@@ -65,9 +66,27 @@ func _init() -> void:
 			var hit: Dictionary = crowd.pick_person_from_screen(camera, screen_pos, 48.0)
 			selected_id = int(hit.get("person_id", -1))
 			if selected_id != -1:
-				ui.select_person(selected_id)
+				selected_focus = (child as Node3D).global_position + Vector3(0.0, 1.2, 0.0)
+				ui.call("_pick_person_at_screen", screen_pos)
 				break
 	assert(selected_id != -1)
+	camera.global_position = selected_focus + Vector3(0.0, 0.8, 3.0)
+	camera.look_at(selected_focus, Vector3.UP)
+	if crowd.get_active_conversation_count() == 0:
+		var triggered: bool = bool(crowd.call("trigger_player_conversation_for_person", selected_id))
+		if not triggered:
+			var internal: Array = crowd.get("_pedestrians")
+			for ped_index in range(internal.size()):
+				var ped: Dictionary = internal[ped_index]
+				var identity: Dictionary = ped.get("identity", {})
+				if int(identity.get("id", -1)) == selected_id:
+					crowd.call("_start_player_conversation", ped_index)
+					break
+	assert(crowd.get_active_conversation_count() > 0)
+	assert(crowd.get_player_conversation_count() > 0)
+	await process_frame
+	ui.call("_update_conversation_boxes")
+	assert(int(ui.call("get_visible_chat_box_count")) > 0)
 
 	var selection := ui.get_node("Panel/Margin/VBox/Selection") as RichTextLabel
 	assert(selection != null)
