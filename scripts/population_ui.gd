@@ -110,7 +110,7 @@ func _ensure_conversation_boxes() -> void:
 		box.name = "ChatBox%d" % index
 		box.visible = false
 		box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		box.size = Vector2(210.0, 58.0)
+		box.size = Vector2(240.0, 88.0)
 		var margin := MarginContainer.new()
 		margin.name = "BubbleMargin"
 		margin.set("theme_override_constants/margin_left", 10)
@@ -122,7 +122,7 @@ func _ensure_conversation_boxes() -> void:
 		label.name = "Text"
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		label.custom_minimum_size = Vector2(190.0, 44.0)
+		label.custom_minimum_size = Vector2(220.0, 74.0)
 		margin.add_child(label)
 		_conversation_overlay.add_child(box)
 		_conversation_boxes.append(box)
@@ -133,7 +133,7 @@ func _update_conversation_boxes() -> void:
 		var control := box as Control
 		if control != null:
 			control.visible = false
-	if _crowd == null or not _crowd.has_method("get_conversation_chat_snapshot") or _camera == null:
+	if _crowd == null or not _crowd.has_method("get_conversation_chat_snapshot"):
 		return
 	var chat_snapshot: Array = _crowd.call("get_conversation_chat_snapshot")
 	var viewport_rect: Rect2 = get_viewport().get_visible_rect()
@@ -141,20 +141,48 @@ func _update_conversation_boxes() -> void:
 	for entry in chat_snapshot:
 		if box_index >= _conversation_boxes.size():
 			break
-		var world_point: Vector3 = Vector3(Dictionary(entry).get("speaker_position", Vector3.ZERO))
-		if _camera.is_position_behind(world_point):
-			continue
-		var screen_point: Vector2 = _camera.unproject_position(world_point)
-		if not viewport_rect.has_point(screen_point):
-			continue
+		var entry_data: Dictionary = Dictionary(entry)
+		var world_point: Vector3 = Vector3(entry_data.get("speaker_position", Vector3.ZERO))
 		var box := _conversation_boxes[box_index] as PanelContainer
 		var label := box.get_node_or_null("BubbleMargin/Text") as Label
 		if label == null:
 			continue
-		label.text = str(Dictionary(entry).get("text", ""))
-		box.position = screen_point - box.size * Vector2(0.5, 1.0) - Vector2(0.0, 10.0)
+		label.text = str(entry_data.get("text", ""))
+		var screen_point: Vector2 = _speech_screen_point(world_point, viewport_rect)
+		if screen_point == Vector2.INF:
+			continue
+		box.position = _clamped_speech_box_position(screen_point, box.size, viewport_rect, box_index)
 		box.visible = true
 		box_index += 1
+
+
+func _speech_screen_point(world_point: Vector3, viewport_rect: Rect2) -> Vector2:
+	if _camera == null:
+		return Vector2.INF
+	if _camera.is_position_behind(world_point):
+		return Vector2.INF
+	var projected: Vector2 = _camera.unproject_position(world_point)
+	if not is_finite(projected.x) or not is_finite(projected.y):
+		return Vector2.INF
+	if not viewport_rect.has_point(projected):
+		return Vector2.INF
+	return projected
+
+
+func _clamped_speech_box_position(screen_point: Vector2, box_size: Vector2, viewport_rect: Rect2, box_index: int) -> Vector2:
+	var margin: float = 12.0
+	var desired: Vector2 = screen_point - box_size * Vector2(0.5, 1.0) - Vector2(0.0, 10.0)
+	var min_position: Vector2 = viewport_rect.position + Vector2(margin, margin)
+	var max_position: Vector2 = viewport_rect.end - box_size - Vector2(margin, margin)
+	if max_position.x < min_position.x:
+		max_position.x = min_position.x
+	if max_position.y < min_position.y:
+		max_position.y = min_position.y
+	desired.x = clampf(desired.x, min_position.x, max_position.x)
+	desired.y = clampf(desired.y, min_position.y, max_position.y)
+	if box_index > 0 and desired.y >= max_position.y - 1.0:
+		desired.y = maxf(min_position.y, desired.y - float(box_index) * (box_size.y + 8.0))
+	return desired
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -210,8 +238,8 @@ func _update_selection_details() -> void:
 		var person: Dictionary = _population.call("get_person", _selected_person_id)
 		if not person.is_empty():
 			lines.append("[b]Resident[/b]: %s" % person.get("full_name", "Resident"))
-			lines.append("Age %d · %s · %s" % [person.get("age", 0), person.get("occupation", "local"), "alive" if bool(person.get("alive", true)) else "deceased"])
-			lines.append("Lineage %s · Generation %s · Household %s" % [person.get("lineage_id", "?"), person.get("generation", "?"), person.get("household_id", "?")])
+			lines.append("Age %d | %s | %s" % [person.get("age", 0), person.get("occupation", "local"), "alive" if bool(person.get("alive", true)) else "deceased"])
+			lines.append("Lineage %s | Generation %s | Household %s" % [person.get("lineage_id", "?"), person.get("generation", "?"), person.get("household_id", "?")])
 			var bio: String = str(person.get("bio", ""))
 			if bio != "":
 				lines.append("")
@@ -242,11 +270,11 @@ func _update_selection_details() -> void:
 					for bond in bonds:
 						var score: int = int(bond.get("score", 0))
 						var sign: String = "+" if score >= 0 else ""
-						lines.append("  • %s %s (%s%d)" % [bond.get("target_name", "Resident"), bond.get("kind", "social"), sign, score])
+						lines.append("  - %s %s (%s%d)" % [bond.get("target_name", "Resident"), bond.get("kind", "social"), sign, score])
 	if _selected_household_id != -1 and _population.has_method("get_household"):
 		var household: Dictionary = _population.call("get_household", _selected_household_id)
 		if not household.is_empty():
-			lines.append("\n[b]Household[/b] %d · %s" % [household.get("id", -1), household.get("kind", "home")])
+			lines.append("\n[b]Household[/b] %d | %s" % [household.get("id", -1), household.get("kind", "home")])
 			var member_ids: Array = household.get("member_ids", [])
 			lines.append("Members: %s" % str(member_ids))
 			lines.append("Building: %s" % household.get("building_id", -1))
@@ -266,14 +294,14 @@ func _update_list_panel(events: Array) -> void:
 			var event = events[index]
 			if event is Dictionary:
 				var entry: Dictionary = event
-				lines.append("%s Y%s D%s · %s" % [
+				lines.append("%s Y%s D%s | %s" % [
 					_event_prefix(str(entry.get("type", "system"))),
 					entry.get("year", "?"),
 					entry.get("day_of_year", "?"),
 					str(entry.get("text", "event"))
 				])
 			else:
-				lines.append("• %s" % str(event))
+				lines.append("- %s" % str(event))
 	_list_label.text = "\n".join(lines)
 
 
@@ -304,15 +332,15 @@ func _update_events(events: Array) -> void:
 func _event_prefix(event_type: String) -> String:
 	match event_type:
 		"birth":
-			return "🎈"
+			return "[Birth]"
 		"marriage":
-			return "✿"
+			return "[Marriage]"
 		"birthday":
-			return "★"
+			return "[Birthday]"
 		"death":
-			return "✧"
+			return "[Death]"
 		_:
-			return "•"
+			return "[Event]"
 
 
 func _tracked_person_ids() -> Array:
@@ -500,7 +528,7 @@ func _on_jump_to_selection() -> void:
 	_camera.position = anchor + Vector3(0.0, 1.65, 0.0)
 
 
-func select_person(person_id: int) -> void:
+func select_person(person_id: int, sync_visualization: bool = true) -> void:
 	if _population == null or not _population.has_method("get_person"):
 		return
 	var person: Dictionary = _population.call("get_person", person_id)
@@ -509,7 +537,8 @@ func select_person(person_id: int) -> void:
 	_selected_person_id = int(person.get("id", -1))
 	_selected_household_id = int(person.get("household_id", -1))
 	_list_mode = "population"
-	_sync_tracked_visualization()
+	if sync_visualization:
+		_sync_tracked_visualization()
 	_update_ui()
 
 
@@ -521,9 +550,12 @@ func _pick_person_at_screen(screen_position: Vector2) -> void:
 		return
 	var person_id: int = int(hit.get("person_id", -1))
 	if person_id != -1:
-		select_person(person_id)
-		if _crowd.has_method("trigger_player_conversation_for_person"):
-			_crowd.call("trigger_player_conversation_for_person", person_id)
+		var started: bool = false
+		if _crowd.has_method("trigger_player_conversation_for_pedestrian"):
+			started = bool(_crowd.call("trigger_player_conversation_for_pedestrian", int(hit.get("ped_index", -1))))
+		elif _crowd.has_method("trigger_player_conversation_for_person"):
+			started = bool(_crowd.call("trigger_player_conversation_for_person", person_id))
+		select_person(person_id, not started)
 
 
 func _relationship_names(raw_ids: Variant, limit: int = 4) -> String:

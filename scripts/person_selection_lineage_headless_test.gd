@@ -34,6 +34,7 @@ func _init() -> void:
 	crowd.min_dogs = 0
 	crowd.max_dogs = 0
 	crowd.max_detailed_pedestrians = 0
+	crowd.enable_llm_conversations = false
 	root.add_child(crowd)
 	crowd.populate_now()
 
@@ -87,6 +88,15 @@ func _init() -> void:
 	await process_frame
 	ui.call("_update_conversation_boxes")
 	assert(int(ui.call("get_visible_chat_box_count")) > 0)
+	var first_box := ui.get_node("ConversationOverlay/ChatBox0") as Control
+	assert(first_box != null)
+	var viewport_rect: Rect2 = root.get_viewport().get_visible_rect()
+	assert(viewport_rect.has_point(first_box.position + first_box.size * 0.5))
+
+	camera.global_position = selected_focus + Vector3(0.0, 0.8, -3.0)
+	camera.look_at(selected_focus - Vector3(0.0, 0.0, 6.0), Vector3.UP)
+	ui.call("_update_conversation_boxes")
+	assert(int(ui.call("get_visible_chat_box_count")) == 0)
 
 	var selection := ui.get_node("Panel/Margin/VBox/Selection") as RichTextLabel
 	assert(selection != null)

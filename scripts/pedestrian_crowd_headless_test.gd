@@ -87,13 +87,28 @@ func _init() -> void:
 	var dog_count: int = 0
 	var grouped_people: int = 0
 	var hotspot_people: int = 0
+	var visual_ids: Dictionary = {}
+	for entry in snapshot_before:
+		var identity_for_id: Dictionary = Dictionary(entry.get("identity", {}))
+		if not identity_for_id.is_empty():
+			visual_ids[int(identity_for_id.get("id", -1))] = true
 	for entry in snapshot_before:
 		if String(entry.get("type", "")) == "dog":
 			dog_count += 1
-		if ["plaza", "coffee", "shopping", "market", "evening_stroll"].has(String(entry.get("mode", ""))):
+		if ["plaza", "coffee", "shopping", "market", "evening_stroll", "family_walk"].has(String(entry.get("mode", ""))):
 			hotspot_people += 1
 		if String(entry.get("group_kind", "solo")) != "solo":
 			grouped_people += 1
+		var entry_identity: Dictionary = Dictionary(entry.get("identity", {}))
+		if not entry_identity.is_empty() and int(entry_identity.get("age", 0)) < 12:
+			assert(String(entry.get("group_kind", "solo")) != "solo")
+			var entry_activity: Dictionary = population.get_person_activity(int(entry_identity.get("id", -1)))
+			var has_guardian: bool = false
+			for guardian_id in Array(entry_activity.get("guardian_ids", [])):
+				if visual_ids.has(int(guardian_id)):
+					has_guardian = true
+					break
+			assert(has_guardian)
 	assert(grouped_people > 0)
 	assert(hotspot_people > 0)
 	assert(dog_count >= 2)
@@ -186,7 +201,9 @@ func _init() -> void:
 			meetup_count += 1
 	assert(moved_any)
 	assert(meetup_count > 0)
-	assert(Array(crowd.call("get_conversation_chat_snapshot")).is_empty())
+	var long_running_chat: Array = crowd.call("get_conversation_chat_snapshot")
+	assert(not long_running_chat.is_empty())
+	assert(String(Dictionary(long_running_chat[0]).get("text", "")).split("\n").size() <= 3)
 
 	root.free()
 	print("pedestrian_crowd_headless_test: ok")

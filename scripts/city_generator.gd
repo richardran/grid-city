@@ -105,6 +105,8 @@ var _terrain_noise: FastNoiseLite
 var _generated_root: Node3D
 var _street_heights: Dictionary = {}
 var _walk_areas: Array = []
+var _walk_area_spatial_index: Dictionary = {}
+var _walk_area_index_cell_size: float = 24.0
 var _building_slots: Array = []
 var _city_base_y: float = -12.0
 var _main_avenue_x: int = 0
@@ -148,6 +150,8 @@ func generate_city() -> void:
 	_compute_street_heights()
 	_compute_city_base_height()
 	_walk_areas.clear()
+	_walk_area_spatial_index.clear()
+	_walk_area_index_cell_size = maxf(1.0, block_size + street_width)
 	_building_slots.clear()
 	_emissive_material_profiles.clear()
 
@@ -1674,6 +1678,7 @@ func _edge_flat_road_sections(side: String, gx: int, gz: int) -> Array:
 
 func _register_walk_area(x_band: Vector2, z_band: Vector2, top_y: float, kind: String = "road", weight: float = 1.0) -> void:
 	var area_size: float = maxf(0.01, (x_band.y - x_band.x) * (z_band.y - z_band.x))
+	var area_index: int = _walk_areas.size()
 	_walk_areas.append({
 		"x": x_band,
 		"z": z_band,
@@ -1682,6 +1687,7 @@ func _register_walk_area(x_band: Vector2, z_band: Vector2, top_y: float, kind: S
 		"weight": maxf(0.01, weight),
 		"area": area_size
 	})
+	_index_walk_area(area_index, x_band, z_band)
 
 func get_spawn_point() -> Vector3:
 	var start_node := Vector2i(_main_avenue_x, maxi(1, int(grid_size.y * 0.28)))
@@ -1769,11 +1775,13 @@ func get_nearest_walk_ground_point(world_position: Vector3) -> Vector3:
 		return Vector3(world_position.x, _city_base_y, world_position.z)
 	var best_dist: float = INF
 	var best_point := Vector3(world_position.x, _city_base_y, world_position.z)
-	for area in _walk_areas:
+	for area in _walk_area_candidates(world_position, street_width * 0.8):
 		var clamped_x: float = clampf(world_position.x, area["x"].x, area["x"].y)
 		var clamped_z: float = clampf(world_position.z, area["z"].x, area["z"].y)
 		var candidate := Vector3(clamped_x, float(area["y"]), clamped_z)
-		var distance_sq: float = Vector2(candidate.x - world_position.x, candidate.z - world_position.z).length_squared()
+		var dx: float = candidate.x - world_position.x
+		var dz: float = candidate.z - world_position.z
+		var distance_sq: float = dx * dx + dz * dz
 		if distance_sq < best_dist:
 			best_dist = distance_sq
 			best_point = candidate
@@ -1805,20 +1813,55 @@ func _closest_walk_snap(world_position: Vector3) -> Dictionary:
 	var best_valid: bool = false
 	var max_snap: float = street_width * 0.55
 
-	for area in _walk_areas:
+	for area in _walk_area_candidates(world_position, max_snap):
 		var clamped_x: float = clampf(world_position.x, area["x"].x, area["x"].y)
 		var clamped_z: float = clampf(world_position.z, area["z"].x, area["z"].y)
 		var dx: float = world_position.x - clamped_x
 		var dz: float = world_position.z - clamped_z
-		var dist: float = sqrt(dx * dx + dz * dz)
-		if dist <= max_snap and dist < best_dist:
-			best_dist = dist
+		var dist_sq: float = dx * dx + dz * dz
+		if dist_sq <= max_snap * max_snap and dist_sq < best_dist:
+			best_dist = dist_sq
 			best_point = Vector3(clamped_x, 0.0, clamped_z)
 			best_ground_height = float(area["y"])
 			best_height = best_ground_height + 1.65
 			best_valid = true
 
 	return {"valid": best_valid, "position": best_point, "ground_height": best_ground_height, "height": best_height}
+
+
+func _index_walk_area(area_index: int, x_band: Vector2, z_band: Vector2) -> void:
+	var min_cell := _walk_area_cell_for_point(Vector3(x_band.x, 0.0, z_band.x))
+	var max_cell := _walk_area_cell_for_point(Vector3(x_band.y, 0.0, z_band.y))
+	for cx in range(min_cell.x, max_cell.x + 1):
+		for cz in range(min_cell.y, max_cell.y + 1):
+			var key := Vector2i(cx, cz)
+			var bucket: Array = _walk_area_spatial_index.get(key, [])
+			bucket.append(area_index)
+			_walk_area_spatial_index[key] = bucket
+
+
+func _walk_area_candidates(world_position: Vector3, search_radius: float) -> Array:
+	if _walk_area_spatial_index.is_empty():
+		return _walk_areas
+	var min_cell := _walk_area_cell_for_point(world_position - Vector3(search_radius, 0.0, search_radius))
+	var max_cell := _walk_area_cell_for_point(world_position + Vector3(search_radius, 0.0, search_radius))
+	var seen: Dictionary = {}
+	var candidates: Array = []
+	for cx in range(min_cell.x, max_cell.x + 1):
+		for cz in range(min_cell.y, max_cell.y + 1):
+			var key := Vector2i(cx, cz)
+			for area_index in _walk_area_spatial_index.get(key, []):
+				var resolved_index: int = int(area_index)
+				if seen.has(resolved_index) or resolved_index < 0 or resolved_index >= _walk_areas.size():
+					continue
+				seen[resolved_index] = true
+				candidates.append(_walk_areas[resolved_index])
+	return candidates if not candidates.is_empty() else _walk_areas
+
+
+func _walk_area_cell_for_point(world_position: Vector3) -> Vector2i:
+	var cell_size: float = maxf(1.0, _walk_area_index_cell_size)
+	return Vector2i(int(floor(world_position.x / cell_size)), int(floor(world_position.z / cell_size)))
 
 func _register_building_slot(slot: Dictionary) -> void:
 	_building_slots.append(slot)

@@ -32,8 +32,8 @@ Or open the `godot-city-grid` folder in the Godot editor.
 
 ## Controls
 
-- `Up / Down`: walk forward / backward
-- `Left / Right`: turn
+- `W / S` or `Up / Down`: walk forward / backward
+- `A / D` or `Left / Right`: turn
 - `V`: toggle between ground view and overlook view
 - Walk near pedestrians to occasionally trigger short nearby remarks
 - Click a pedestrian to inspect them and force a short conversation with that person

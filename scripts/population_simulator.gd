@@ -22,6 +22,9 @@ const ADULT_JOBS := [
 ]
 const SENIOR_JOBS := ["retired teacher", "retired carpenter", "retired nurse", "retired clerk", "retired tailor"]
 const CHILD_ROLES := ["student", "student", "student", "teen helper", "little explorer"]
+const CHARACTER_TRAITS := ["curious", "patient", "practical", "sociable", "reserved", "restless", "careful", "warm", "ambitious", "playful"]
+const CHARACTER_VALUES := ["family", "craft", "stability", "learning", "community", "independence", "comfort", "novelty"]
+const CHARACTER_QUIRKS := ["notices small changes", "keeps a familiar route", "checks in on neighbors", "likes quiet corners", "lingers near shop windows", "walks with purpose", "prefers company", "takes the scenic way"]
 const SPEED_PRESETS := [0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 6.0, 24.0]
 const STRONG_BOND_THRESHOLD := 45
 const MARRIAGE_BOND_THRESHOLD := 36
@@ -66,6 +69,8 @@ var _birth_count: int = 0
 var _death_count: int = 0
 var _recent_events: Array[String] = []
 var _recent_event_records: Array[Dictionary] = []
+var _person_activity_cache: Dictionary = {}
+var _visual_intent_cache: Dictionary = {}
 
 
 func _ready() -> void:
@@ -88,6 +93,8 @@ func generate_population() -> void:
 	_building_occupancy.clear()
 	_recent_events.clear()
 	_recent_event_records.clear()
+	_person_activity_cache.clear()
+	_visual_intent_cache.clear()
 	_birth_count = 0
 	_death_count = 0
 	_next_person_id = 1
@@ -266,7 +273,7 @@ func get_population_summary() -> Dictionary:
 
 
 func get_time_label() -> String:
-	return "Year %d · %s · %s" % [_current_year, get_day_phase_label(), _hour_label(_current_hour)]
+	return "Year %d | %s | %s" % [_current_year, get_day_phase_label(), _hour_label(_current_hour)]
 
 
 func get_day_phase_label() -> String:
@@ -308,6 +315,47 @@ func get_person(person_id: int) -> Dictionary:
 func get_household(household_id: int) -> Dictionary:
 	var household: Dictionary = _households_by_id.get(household_id, {})
 	return household.duplicate(true) if not household.is_empty() else {}
+
+
+func get_resident_conversation_context(person_id: int) -> Dictionary:
+	var person: Dictionary = _people_by_id.get(person_id, {})
+	if person.is_empty():
+		return {}
+	var household: Dictionary = _households_by_id.get(int(person.get("household_id", -1)), {})
+	var member_names: Array[String] = []
+	for member_id in household.get("member_ids", []):
+		var resolved_id: int = int(member_id)
+		if resolved_id == person_id:
+			continue
+		var member: Dictionary = _people_by_id.get(resolved_id, {})
+		if member.is_empty() or not bool(member.get("alive", true)):
+			continue
+		member_names.append(str(member.get("full_name", "Resident")))
+		if member_names.size() >= 4:
+			break
+	return {
+		"person": {
+			"id": person_id,
+			"first_name": person.get("first_name", person.get("full_name", "Resident")),
+			"full_name": person.get("full_name", "Resident"),
+			"age": person.get("age", 0),
+			"occupation": person.get("occupation", "local"),
+			"bio": person.get("bio", ""),
+			"character": Dictionary(person.get("character", {})).duplicate(true),
+			"lineage_id": person.get("lineage_id", "L000")
+		},
+		"activity": get_person_activity(person_id),
+		"household": {
+			"id": household.get("id", -1),
+			"kind": household.get("kind", "home"),
+			"member_count": Array(household.get("member_ids", [])).size(),
+			"member_names": member_names
+		},
+		"top_bonds": get_social_bonds(person_id, 3),
+		"recent_events": _recent_events_for_person(person_id, int(person.get("household_id", -1)), 3),
+		"time_label": get_time_label(),
+		"day_phase": get_day_phase_label()
+	}
 
 
 func get_sibling_ids(person_id: int, include_deceased: bool = true) -> Array:
@@ -367,7 +415,65 @@ func get_visual_time_state() -> Dictionary:
 	}
 
 
+func get_visible_resident_intents(count: int, tracked_person_ids: Array = []) -> Array:
+	var requested_count: int = maxi(0, count)
+	if requested_count <= 0:
+		return []
+	var cache_key: String = _visual_intent_cache_key(requested_count, tracked_person_ids)
+	if _visual_intent_cache.has(cache_key):
+		return Array(_visual_intent_cache[cache_key]).duplicate(true)
+	var selected: Array = []
+	var seen: Dictionary = {}
+	for raw_id in tracked_person_ids:
+		var tracked_id: int = int(raw_id)
+		var tracked: Dictionary = _people_by_id.get(tracked_id, {})
+		if _person_can_be_visualized(tracked):
+			_append_visual_intent_for_person(selected, seen, tracked)
+			_append_required_companions_for_visual_intent(selected, seen, tracked, requested_count)
+	var candidates: Array = []
+	for person in _people:
+		if not _person_can_be_visualized(person):
+			continue
+		var person_id: int = int(person.get("id", -1))
+		if seen.has(person_id):
+			continue
+		var activity: Dictionary = get_person_activity(person_id)
+		if bool(activity.get("requires_guardian", false)) and Array(activity.get("guardian_ids", [])).is_empty():
+			continue
+		candidates.append({
+			"person": person,
+			"activity": activity,
+			"score": _visual_intent_score(person, activity)
+		})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var score_a: float = float(a.get("score", 0.0))
+		var score_b: float = float(b.get("score", 0.0))
+		if is_equal_approx(score_a, score_b):
+			return int(Dictionary(a.get("person", {})).get("id", -1)) < int(Dictionary(b.get("person", {})).get("id", -1))
+		return score_a > score_b
+	)
+	for wrapped in candidates:
+		if selected.size() >= requested_count:
+			break
+		var person: Dictionary = Dictionary(wrapped.get("person", {}))
+		var person_id: int = int(person.get("id", -1))
+		if seen.has(person_id):
+			continue
+		if bool(Dictionary(wrapped.get("activity", {})).get("requires_guardian", false)):
+			_append_required_companions_for_visual_intent(selected, seen, person, requested_count)
+			if not _selected_has_guardian_for_person(selected, person):
+				continue
+		_append_visual_intent_for_person(selected, seen, person)
+		_append_natural_companions_for_visual_intent(selected, seen, person, requested_count)
+	var result: Array = selected.slice(0, mini(requested_count, selected.size()))
+	_visual_intent_cache[cache_key] = result.duplicate(true)
+	return result
+
+
 func get_person_activity(person_id: int) -> Dictionary:
+	var cache_key: String = _person_activity_cache_key(person_id)
+	if _person_activity_cache.has(cache_key):
+		return Dictionary(_person_activity_cache[cache_key]).duplicate(true)
 	var person: Dictionary = _people_by_id.get(person_id, {})
 	if person.is_empty() or not bool(person.get("alive", true)):
 		return {}
@@ -378,45 +484,211 @@ func get_person_activity(person_id: int) -> Dictionary:
 	var age: int = int(person.get("age", 0))
 	var work_building_id: Variant = person.get("work_building_id", -1)
 	var walk_habit: bool = _has_evening_walk_habit(person_id, person)
+	if age < 5:
+		var guardian_ids: Array[int] = _guardian_ids_for_child(person)
+		if hour >= 9.5 and hour < 18.5 and not guardian_ids.is_empty() and routine_roll < 32:
+			var stroller_target: Vector3 = _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 31, 7.5)
+			return _cache_person_activity(cache_key, _make_activity(person, person_id, "family_walk", stroller_target, "care", "fresh_air", true, "", guardian_ids, true))
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "home", target, "care", "nap_or_play", false, "", guardian_ids, true))
+	if age < 10 and (hour < 7.0 or hour >= 19.5):
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "home", target, "care", "family_time", false, "", _guardian_ids_for_child(person), true))
 	if hour >= 7.25 and hour < 9.0 and str(work_building_id) != "-1" and routine_roll < 72:
 		target = _pick_promenade_target_near(Vector3(person.get("work_entry", target)), person_id, 9.0)
-		return _make_activity(person, person_id, "commute", target, "goal", "work", false)
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "commute", target, "goal", "work", false))
 	elif age < 18 and hour >= 7.5 and hour < 15.5 and str(work_building_id) != "-1":
 		target = Vector3(person.get("work_entry", target))
 		if hour >= 11.5 and hour <= 13.5 and routine_roll < 18:
 			var student_break := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], ["bakery", "coffee_shop"])
-			return _make_activity(person, person_id, "errand", _point_for_destination_slot(student_break, person_id, target), "errand", "snack", true, str(student_break.get("venue_type", "")))
-		return _make_activity(person, person_id, "school", target, "goal", "school", false)
+			return _cache_person_activity(cache_key, _make_activity(person, person_id, "errand", _point_for_destination_slot(student_break, person_id, target), "errand", "snack", age >= 12, str(student_break.get("venue_type", "")), _guardian_ids_for_child(person), age < 12))
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "school", target, "goal", "school", false, "", _guardian_ids_for_child(person), age < 12))
 	elif hour >= 8.0 and hour < 17.0 and str(work_building_id) != "-1":
 		target = Vector3(person.get("work_entry", target))
 		if hour >= 11.25 and hour <= 14.5:
 			if routine_roll < 18:
 				var coffee_slot := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], ["coffee_shop"])
-				return _make_activity(person, person_id, "coffee", _point_for_destination_slot(coffee_slot, person_id, target), "goal", "coffee", true, str(coffee_slot.get("venue_type", "coffee_shop")))
+				return _cache_person_activity(cache_key, _make_activity(person, person_id, "coffee", _point_for_destination_slot(coffee_slot, person_id, target), "goal", "coffee", true, str(coffee_slot.get("venue_type", "coffee_shop"))))
 			elif routine_roll < 44:
 				var lunch_errand := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], _shopping_venue_preferences(person))
-				return _make_activity(person, person_id, "shopping", _point_for_destination_slot(lunch_errand, person_id, target), "errand", "shopping", true, str(lunch_errand.get("venue_type", "")))
-		return _make_activity(person, person_id, "work", target, "goal", "work", false)
+				return _cache_person_activity(cache_key, _make_activity(person, person_id, "shopping", _point_for_destination_slot(lunch_errand, person_id, target), "errand", "shopping", true, str(lunch_errand.get("venue_type", ""))))
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "work", target, "goal", "work", false))
 	elif hour >= 9.0 and hour < 16.5 and routine_roll < 24:
 		var errand_slot := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], _shopping_venue_preferences(person))
-		return _make_activity(person, person_id, "errand", _point_for_destination_slot(errand_slot, person_id, target), "errand", "shopping", true, str(errand_slot.get("venue_type", "")))
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "errand", _point_for_destination_slot(errand_slot, person_id, target), "errand", "shopping", true, str(errand_slot.get("venue_type", ""))))
 	elif hour >= 17.0 and hour < 20.75:
 		if routine_roll < 22:
 			var coffee_evening := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], ["coffee_shop"])
-			return _make_activity(person, person_id, "coffee", _point_for_destination_slot(coffee_evening, person_id, target), "goal", "coffee", true, str(coffee_evening.get("venue_type", "coffee_shop")))
+			return _cache_person_activity(cache_key, _make_activity(person, person_id, "coffee", _point_for_destination_slot(coffee_evening, person_id, target), "goal", "coffee", true, str(coffee_evening.get("venue_type", "coffee_shop"))))
 		elif routine_roll < 52:
 			var shopping_slot := _pick_destination_slot_for_person(person, ["mixed_use", "plaza", "civic_landmark"], _shopping_venue_preferences(person))
-			return _make_activity(person, person_id, "shopping", _point_for_destination_slot(shopping_slot, person_id, target), "goal", "shopping", true, str(shopping_slot.get("venue_type", "")))
+			return _cache_person_activity(cache_key, _make_activity(person, person_id, "shopping", _point_for_destination_slot(shopping_slot, person_id, target), "goal", "shopping", true, str(shopping_slot.get("venue_type", ""))))
 		elif walk_habit or routine_roll < 80:
-			return _make_activity(person, person_id, "evening_stroll", _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0), "habit", "walk", true)
+			return _cache_person_activity(cache_key, _make_activity(person, person_id, "evening_stroll", _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0), "habit", "walk", true, "", _guardian_ids_for_child(person), age < 12))
 		else:
-			return _make_activity(person, person_id, "wander", _random_walk_anchor_near(Vector3(person.get("home_entry", target)), 16.0 if age < 18 else 12.5), "habit", "air", true)
+			return _cache_person_activity(cache_key, _make_activity(person, person_id, "wander", _random_walk_anchor_near(Vector3(person.get("home_entry", target)), 16.0 if age < 18 else 12.5), "habit", "air", age >= 12, "", _guardian_ids_for_child(person), age < 12))
 	elif hour >= 20.75 and hour < 22.5 and (walk_habit or routine_roll < 36):
-		return _make_activity(person, person_id, "evening_stroll", _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0), "habit", "walk", true)
-	return _make_activity(person, person_id, "home", target, "habit", "home", false)
+		return _cache_person_activity(cache_key, _make_activity(person, person_id, "evening_stroll", _pick_promenade_target_near(Vector3(person.get("home_entry", target)), person_id + 17, 11.0), "habit", "walk", age >= 12, "", _guardian_ids_for_child(person), age < 12))
+	return _cache_person_activity(cache_key, _make_activity(person, person_id, "home", target, "habit", "home", false))
 
 
-func _make_activity(person: Dictionary, person_id: int, mode: String, target: Vector3, motivation: String, goal: String, shareable: bool, venue_type: String = "") -> Dictionary:
+func _person_activity_cache_key(person_id: int) -> String:
+	return "%d:%d:%d:%d" % [person_id, _current_year, _current_day_of_year, int(floor(_current_hour * 4.0))]
+
+
+func _cache_person_activity(cache_key: String, activity: Dictionary) -> Dictionary:
+	if _person_activity_cache.size() > 512:
+		_person_activity_cache.clear()
+	_person_activity_cache[cache_key] = activity.duplicate(true)
+	return activity
+
+
+func _visual_intent_cache_key(count: int, tracked_person_ids: Array) -> String:
+	var tracked_parts: PackedStringArray = []
+	for raw_id in tracked_person_ids:
+		tracked_parts.append(str(int(raw_id)))
+	return "%d:%d:%d:%d:%s" % [count, _current_year, _current_day_of_year, int(floor(_current_hour * 2.0)), ",".join(tracked_parts)]
+
+
+func _person_can_be_visualized(person: Dictionary) -> bool:
+	if person.is_empty() or not bool(person.get("alive", true)):
+		return false
+	return int(person.get("age", 0)) >= 2
+
+
+func _append_visual_intent_for_person(selected: Array, seen: Dictionary, person: Dictionary) -> void:
+	var person_id: int = int(person.get("id", -1))
+	if person_id <= 0 or seen.has(person_id):
+		return
+	var identity: Dictionary = person.duplicate(true)
+	var activity: Dictionary = get_person_activity(person_id)
+	identity["_activity"] = activity
+	identity["character"] = Dictionary(person.get("character", {})).duplicate(true)
+	selected.append({
+		"identity": identity,
+		"activity": activity,
+		"visibility_score": _visual_intent_score(person, activity)
+	})
+	seen[person_id] = true
+
+
+func _append_required_companions_for_visual_intent(selected: Array, seen: Dictionary, person: Dictionary, requested_count: int) -> void:
+	if selected.size() >= requested_count:
+		return
+	var activity: Dictionary = get_person_activity(int(person.get("id", -1)))
+	for raw_guardian_id in Array(activity.get("guardian_ids", [])):
+		if selected.size() >= requested_count:
+			break
+		var guardian_id: int = int(raw_guardian_id)
+		var guardian: Dictionary = _people_by_id.get(guardian_id, {})
+		if not _person_can_be_visualized(guardian):
+			continue
+		_append_visual_intent_for_person(selected, seen, guardian)
+
+
+func _append_natural_companions_for_visual_intent(selected: Array, seen: Dictionary, person: Dictionary, requested_count: int) -> void:
+	if selected.size() >= requested_count:
+		return
+	var person_id: int = int(person.get("id", -1))
+	var activity: Dictionary = get_person_activity(person_id)
+	if int(person.get("age", 0)) < 12:
+		_append_required_companions_for_visual_intent(selected, seen, person, requested_count)
+		return
+	if bool(activity.get("shareable", false)) and int(person.get("spouse_id", -1)) > 0:
+		var spouse: Dictionary = _people_by_id.get(int(person.get("spouse_id", -1)), {})
+		if _person_can_be_visualized(spouse):
+			_append_visual_intent_for_person(selected, seen, spouse)
+
+
+func _selected_has_guardian_for_person(selected: Array, person: Dictionary) -> bool:
+	var activity: Dictionary = get_person_activity(int(person.get("id", -1)))
+	var guardian_ids: Array = Array(activity.get("guardian_ids", []))
+	if guardian_ids.is_empty():
+		return false
+	for intent in selected:
+		var identity: Dictionary = Dictionary(Dictionary(intent).get("identity", {}))
+		if guardian_ids.has(int(identity.get("id", -1))):
+			return true
+	return false
+
+
+func _visual_intent_score(person: Dictionary, activity: Dictionary) -> float:
+	var age: int = int(person.get("age", 0))
+	var mode: String = str(activity.get("mode", "home"))
+	var character: Dictionary = Dictionary(person.get("character", {}))
+	var score: float = float(_positive_modulo(int(person.get("id", 0)) * 19 + _current_day_of_year * 7 + int(floor(_current_hour * 2.0)) * 13, 100)) * 0.08
+	match mode:
+		"coffee":
+			score += 150.0
+		"shopping":
+			score += 140.0
+		"evening_stroll", "family_walk":
+			score += 132.0
+		"errand":
+			score += 118.0
+		"wander":
+			score += 84.0
+		"school", "work", "commute":
+			score += 34.0
+		"home":
+			score += 4.0
+		_:
+			score += 20.0
+	if age < 5:
+		score -= 90.0
+	elif age < 12:
+		score -= 28.0
+	elif age >= 68:
+		score += 14.0
+	if bool(activity.get("requires_guardian", false)):
+		score -= 20.0
+	if str(character.get("trait", "")) == "sociable" or str(character.get("trait", "")) == "restless":
+		score += 14.0
+	if str(character.get("value", "")) == "community":
+		score += 10.0
+	return score
+
+
+func _guardian_ids_for_child(person: Dictionary) -> Array[int]:
+	var guardians: Array[int] = []
+	for key in ["mother_id", "father_id"]:
+		var parent_id: int = int(person.get(key, -1))
+		var parent: Dictionary = _people_by_id.get(parent_id, {})
+		if parent_id > 0 and bool(parent.get("alive", true)) and not guardians.has(parent_id):
+			guardians.append(parent_id)
+	var household: Dictionary = _households_by_id.get(int(person.get("household_id", -1)), {})
+	if not household.is_empty():
+		for raw_member_id in Array(household.get("member_ids", [])):
+			var member_id: int = int(raw_member_id)
+			if guardians.has(member_id) or member_id == int(person.get("id", -1)):
+				continue
+			var member: Dictionary = _people_by_id.get(member_id, {})
+			if bool(member.get("alive", true)) and int(member.get("age", 0)) >= 16:
+				guardians.append(member_id)
+			if guardians.size() >= 2:
+				break
+	return guardians
+
+
+func _recent_events_for_person(person_id: int, household_id: int, limit: int = 3) -> Array:
+	var result: Array = []
+	for index in range(_recent_event_records.size() - 1, -1, -1):
+		var event: Dictionary = _recent_event_records[index]
+		var event_person_ids: Array = event.get("person_ids", [])
+		var matched_person: bool = event_person_ids.has(person_id) or int(event.get("primary_person_id", -1)) == person_id
+		var matched_household: bool = household_id != -1 and int(event.get("household_id", -1)) == household_id
+		if not matched_person and not matched_household:
+			continue
+		result.append({
+			"type": event.get("type", "event"),
+			"text": event.get("text", "event"),
+			"year": event.get("year", _current_year),
+			"day_of_year": event.get("day_of_year", _current_day_of_year)
+		})
+		if result.size() >= limit:
+			break
+	return result
+
+
+func _make_activity(person: Dictionary, person_id: int, mode: String, target: Vector3, motivation: String, goal: String, shareable: bool, venue_type: String = "", guardian_ids: Array[int] = [], requires_guardian: bool = false) -> Dictionary:
 	var display_mode: String = mode.replace("_", " ")
 	return {
 		"mode": mode,
@@ -426,8 +698,10 @@ func _make_activity(person: Dictionary, person_id: int, mode: String, target: Ve
 		"shareable": shareable,
 		"initiative": "self",
 		"initiator_id": person_id,
+		"requires_guardian": requires_guardian,
+		"guardian_ids": guardian_ids.duplicate(),
 		"venue_type": venue_type,
-		"label": "%s → %s" % [person.get("full_name", "Resident"), display_mode]
+		"label": "%s -> %s" % [person.get("full_name", "Resident"), display_mode]
 	}
 
 
@@ -495,6 +769,8 @@ func is_paused() -> bool:
 func advance_hours(hours: float) -> void:
 	if hours <= 0.0:
 		return
+	_person_activity_cache.clear()
+	_visual_intent_cache.clear()
 	var remaining: float = hours
 	while remaining > 0.0001:
 		var until_epoch: float = _visual_hours_until_next_year_epoch()
@@ -513,6 +789,8 @@ func advance_hours(hours: float) -> void:
 
 func advance_years(years: int = 1) -> void:
 	for _i in range(maxi(0, years)):
+		_person_activity_cache.clear()
+		_visual_intent_cache.clear()
 		_current_year += 1
 		_current_day_of_year = 1
 		_current_hour = YEAR_EPOCH_HOUR
@@ -635,6 +913,7 @@ func _create_person(lineage_id: String, first_name: String, last_name: String, g
 		"social_bonds": {},
 		"alive": true,
 		"death_year": -1,
+		"character": _character_profile_for_person(first_name, age, occupation),
 		"bio": _bio_for_person(first_name, age, occupation)
 	}
 	_next_person_id += 1
@@ -1388,6 +1667,50 @@ func _bio_for_person(first_name: String, age: int, occupation: String) -> String
 	if age < 18:
 		return "%s is %d and known around the block as a %s." % [first_name, age, occupation]
 	return "%s is %d and works as a %s." % [first_name, age, occupation]
+
+
+func _character_profile_for_person(first_name: String, age: int, occupation: String) -> Dictionary:
+	var personality_trait: String = str(_pick(CHARACTER_TRAITS))
+	var core_value: String = str(_pick(CHARACTER_VALUES))
+	var quirk: String = str(_pick(CHARACTER_QUIRKS))
+	var energy: String = "steady"
+	if age < 12:
+		energy = "small_child"
+	elif age < 20:
+		energy = "young"
+	elif age >= 68:
+		energy = "slow"
+	elif personality_trait == "restless" or personality_trait == "ambitious":
+		energy = "brisk"
+	var motivation: String = _motivation_for_profile(age, occupation, personality_trait, core_value)
+	return {
+		"trait": personality_trait,
+		"value": core_value,
+		"quirk": quirk,
+		"energy": energy,
+		"motivation": motivation,
+		"summary": "%s is %s, values %s, and %s." % [first_name, personality_trait, core_value, quirk]
+	}
+
+
+func _motivation_for_profile(age: int, occupation: String, personality_trait: String, core_value: String) -> String:
+	if age < 5:
+		return "stay close to family"
+	if age < 12:
+		return "explore safely with an older person nearby"
+	if age < 18:
+		return "balance school, friends, and a bit of independence"
+	if occupation.contains("teacher") or occupation.contains("bookseller") or core_value == "learning":
+		return "notice what the neighborhood is learning today"
+	if occupation.contains("baker") or occupation.contains("cook") or occupation.contains("barista"):
+		return "keep the day fed and friendly"
+	if core_value == "community" or personality_trait == "warm":
+		return "keep ties with familiar people"
+	if personality_trait == "ambitious":
+		return "get things done before the day slips away"
+	if age >= 62:
+		return "keep a comfortable rhythm and familiar routes"
+	return "make the day's routine feel worthwhile"
 
 
 func _scaled_cycle_probability(base_probability: float, cycle_fraction: float) -> float:

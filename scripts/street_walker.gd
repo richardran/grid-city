@@ -33,16 +33,16 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _process(delta: float) -> void:
 	var turn_input: float = 0.0
-	if Input.is_key_pressed(KEY_LEFT):
+	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
 		turn_input += 1.0
-	if Input.is_key_pressed(KEY_RIGHT):
+	if Input.is_key_pressed(KEY_RIGHT) or Input.is_key_pressed(KEY_D):
 		turn_input -= 1.0
 	_yaw += turn_input * turn_speed * delta
 
 	var move_input: float = 0.0
-	if Input.is_key_pressed(KEY_UP):
+	if Input.is_key_pressed(KEY_UP) or Input.is_key_pressed(KEY_W):
 		move_input += 1.0
-	if Input.is_key_pressed(KEY_DOWN):
+	if Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S):
 		move_input -= 1.0
 
 	var forward := Vector3.FORWARD.rotated(Vector3.UP, _yaw)

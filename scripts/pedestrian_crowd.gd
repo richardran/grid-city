@@ -92,7 +92,16 @@ var _player_conversation_delay: float = 0.9
 var _openrouter_api_key: String = ""
 var _openrouter_request_in_flight: bool = false
 var _openrouter_request: HTTPRequest
+var _openrouter_pending_player_requests: Array[int] = []
+var _player_dialogue_memory: Dictionary = {}
+var _player_dialogue_display_seconds: float = 8.0
+var _player_interaction_lock_seconds: float = 12.0
+var _max_player_conversation_boxes: int = 3
+var _player_conversation_recycle_distance: float = 18.0
 var _label_visibility_elapsed: float = 0.0
+var _pedestrian_spatial_index: Dictionary = {}
+var _pedestrian_spatial_cell_size: float = 6.0
+var _pedestrian_spatial_frame: int = -1
 
 
 func _ready() -> void:
@@ -110,8 +119,12 @@ func _ready() -> void:
 
 func clear_pedestrians() -> void:
 	_pedestrians.clear()
+	_pedestrian_spatial_index.clear()
+	_pedestrian_spatial_frame = -1
 	_active_event_effects.clear()
 	_active_conversations.clear()
+	_openrouter_pending_player_requests.clear()
+	_player_dialogue_memory.clear()
 	_social_groups.clear()
 	_person_group_assignments.clear()
 	_group_leader_indices_by_person.clear()
@@ -163,13 +176,24 @@ func get_active_event_effect_count() -> int:
 
 func get_conversation_chat_snapshot() -> Array:
 	var snapshot: Array = []
+	var by_speaker: Dictionary = {}
+	var speaker_order: Array[int] = []
+	var ordered_conversations: Array = []
 	for conversation in _active_conversations:
+		if bool(Dictionary(conversation).get("is_player", false)):
+			ordered_conversations.append(conversation)
+	for conversation in _active_conversations:
+		if not bool(Dictionary(conversation).get("is_player", false)):
+			ordered_conversations.append(conversation)
+	for conversation in ordered_conversations:
 		var line_index: int = int(conversation.get("line_index", 0))
 		var lines: Array = conversation.get("lines", [])
 		if line_index < 0 or line_index >= lines.size():
 			continue
-		var line: Dictionary = Dictionary(lines[line_index])
-		var speaker_index: int = int(line.get("speaker_index", -1))
+		var visible_lines: Array[String] = _visible_lines_for_conversation(conversation, line_index)
+		if visible_lines.is_empty():
+			continue
+		var speaker_index: int = _speaker_index_for_conversation_line(conversation, line_index)
 		if speaker_index < 0 or speaker_index >= _pedestrians.size():
 			continue
 		var speaker: Dictionary = _pedestrians[speaker_index]
@@ -177,18 +201,68 @@ func get_conversation_chat_snapshot() -> Array:
 		if root == null or not is_instance_valid(root):
 			continue
 		var speaker_position: Vector3 = root.global_position if root.is_inside_tree() else root.position
-		var display_text: String = "..." if bool(conversation.get("llm_pending", false)) and bool(conversation.get("is_player", false)) else str(line.get("text", ""))
-		snapshot.append({
-			"conversation_id": str(conversation.get("id", "")),
-			"speaker_index": speaker_index,
-			"speaker_position": speaker_position + Vector3(0.0, 2.45, 0.0),
-			"text": display_text,
-			"is_player": bool(conversation.get("is_player", false)),
-			"llm_pending": bool(conversation.get("llm_pending", false))
-		})
+		if not by_speaker.has(speaker_index):
+			by_speaker[speaker_index] = {
+				"conversation_id": str(conversation.get("id", "")),
+				"speaker_index": speaker_index,
+				"speaker_position": speaker_position + Vector3(0.0, 1.55, 0.0),
+				"lines": [],
+				"is_player": bool(conversation.get("is_player", false)),
+				"llm_pending": bool(conversation.get("llm_pending", false))
+			}
+			speaker_order.append(speaker_index)
+		var entry: Dictionary = Dictionary(by_speaker[speaker_index])
+		if bool(conversation.get("is_player", false)):
+			entry["is_player"] = true
+		if bool(conversation.get("llm_pending", false)):
+			entry["llm_pending"] = true
+		var entry_lines: Array = Array(entry.get("lines", []))
+		for visible_text in visible_lines:
+			if str(visible_text).strip_edges() == "":
+				continue
+			entry_lines.append(str(visible_text))
+			while entry_lines.size() > 3:
+				entry_lines.remove_at(0)
+		entry["lines"] = entry_lines
+		by_speaker[speaker_index] = entry
+	for speaker_index in speaker_order:
+		var entry: Dictionary = Dictionary(by_speaker[speaker_index])
+		var entry_lines: Array = Array(entry.get("lines", []))
+		if entry_lines.is_empty():
+			continue
+		entry["text"] = "\n".join(_string_lines(entry_lines))
+		snapshot.append(entry)
 		if snapshot.size() >= 3:
 			break
 	return snapshot
+
+
+func _speaker_index_for_conversation_line(conversation: Dictionary, line_index: int) -> int:
+	var lines: Array = conversation.get("lines", [])
+	if lines.is_empty():
+		return -1
+	var resolved_index: int = clampi(line_index, 0, lines.size() - 1)
+	return int(Dictionary(lines[resolved_index]).get("speaker_index", -1))
+
+
+func _visible_lines_for_conversation(conversation: Dictionary, line_index: int) -> Array[String]:
+	if bool(conversation.get("llm_pending", false)) and bool(conversation.get("is_player", false)):
+		return ["..."]
+	var lines: Array = conversation.get("lines", [])
+	var visible: Array[String] = []
+	var start_index: int = maxi(0, line_index - 2)
+	for index in range(start_index, mini(line_index + 1, lines.size())):
+		var text: String = str(Dictionary(lines[index]).get("text", "")).strip_edges()
+		if text != "":
+			visible.append(text)
+	return visible
+
+
+func _string_lines(lines: Array) -> Array[String]:
+	var result: Array[String] = []
+	for line in lines:
+		result.append(str(line))
+	return result
 
 
 func get_pedestrian_debug_snapshot() -> Array:
@@ -222,7 +296,8 @@ func pick_person_from_screen(camera: Camera3D, screen_position: Vector2, max_scr
 		return {}
 	var best_hit: Dictionary = {}
 	var best_distance: float = max_screen_distance
-	for ped in _pedestrians:
+	for ped_index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[ped_index]
 		var identity: Dictionary = ped.get("identity", {})
 		var root: Node3D = ped.get("root") as Node3D
 		if identity.is_empty() or root == null or not is_instance_valid(root):
@@ -236,6 +311,7 @@ func pick_person_from_screen(camera: Camera3D, screen_position: Vector2, max_scr
 			continue
 		best_distance = distance
 		best_hit = {
+			"ped_index": ped_index,
 			"person_id": int(identity.get("id", -1)),
 			"identity": identity,
 			"screen_distance": distance,
@@ -258,16 +334,18 @@ func _process(delta: float) -> void:
 		if not is_instance_valid(root) or not is_instance_valid(visual):
 			continue
 		ped["meet_cooldown"] = maxf(0.0, float(ped.get("meet_cooldown", 0.0)) - delta)
+		ped["player_lock_time"] = maxf(0.0, float(ped.get("player_lock_time", 0.0)) - delta)
 		var identity: Dictionary = ped.get("identity", {})
 		var tracked: bool = not identity.is_empty() and _tracked_person_ids.has(int(identity.get("id", -1)))
-		if not tracked and slice_count > 1 and index % slice_count != frame_phase:
-			ped = _animate_actor_visual(ped, delta, false)
-			_pedestrians[index] = ped
-			continue
-		if engaged_player_speakers.has(index):
+		var locked_to_player: bool = engaged_player_speakers.has(index) or float(ped.get("player_lock_time", 0.0)) > 0.0
+		if locked_to_player:
 			ped["pause_time"] = maxf(float(ped.get("pause_time", 0.0)), 0.15)
 			ped["stuck_time"] = 0.0
 			_face_actor_toward_player(root, delta)
+			ped = _animate_actor_visual(ped, delta, false)
+			_pedestrians[index] = ped
+			continue
+		if not tracked and slice_count > 1 and index % slice_count != frame_phase:
 			ped = _animate_actor_visual(ped, delta, false)
 			_pedestrians[index] = ped
 			continue
@@ -321,6 +399,7 @@ func _process(delta: float) -> void:
 		root.rotation.y = lerp_angle(root.rotation.y, heading, minf(1.0, delta * turn_lerp_speed))
 		ped = _animate_actor_visual(ped, delta, true)
 		_pedestrians[index] = ped
+	_pedestrian_spatial_frame = -1
 	_update_conversations(delta)
 	_attempt_dynamic_meetups()
 	_update_event_effects(delta)
@@ -371,6 +450,7 @@ func refresh_identities_from_population() -> void:
 	_resolve_population()
 	if _population == null or _pedestrians.is_empty():
 		return
+	_player_dialogue_memory.clear()
 	var resident_slots: Array[int] = []
 	for index in range(_pedestrians.size()):
 		if str(_pedestrians[index].get("type", "person")) != DOG_TYPE:
@@ -406,7 +486,16 @@ func set_tracked_people(person_ids: Array) -> void:
 	if cleaned == _tracked_person_ids:
 		return
 	_tracked_person_ids = cleaned
+	if _has_active_player_conversation():
+		return
 	refresh_identities_from_population()
+
+
+func _has_active_player_conversation() -> bool:
+	for conversation in _active_conversations:
+		if bool(Dictionary(conversation).get("is_player", false)):
+			return true
+	return false
 
 
 func play_life_event_effect(event: Dictionary) -> void:
@@ -551,6 +640,18 @@ func _compose_resident_identities(target_count: int) -> Array:
 	if _population == null or target_count <= 0:
 		return residents
 	var seen: Dictionary = {}
+	if _population.has_method("get_visible_resident_intents"):
+		for intent in _population.call("get_visible_resident_intents", target_count, _tracked_person_ids):
+			var identity: Dictionary = Dictionary(Dictionary(intent).get("identity", {}))
+			var person_id: int = int(identity.get("id", -1))
+			if person_id <= 0 or seen.has(person_id):
+				continue
+			seen[person_id] = true
+			residents.append(identity)
+			if residents.size() >= target_count:
+				break
+		if not residents.is_empty():
+			return residents.slice(0, mini(target_count, residents.size()))
 	if _population.has_method("get_person"):
 		for tracked_id in _tracked_person_ids:
 			var tracked: Dictionary = _population.call("get_person", tracked_id)
@@ -643,6 +744,11 @@ func _append_social_companions(identity: Dictionary, residents: Array, seen: Dic
 	if _population == null or residents.size() >= target_count or identity.is_empty():
 		return
 	var companion_ids: Array[int] = []
+	var activity: Dictionary = _activity_for_identity(identity)
+	for guardian_id in Array(activity.get("guardian_ids", [])):
+		var resolved_guardian_id: int = int(guardian_id)
+		if resolved_guardian_id > 0 and not companion_ids.has(resolved_guardian_id):
+			companion_ids.append(resolved_guardian_id)
 	var spouse_id: int = int(identity.get("spouse_id", -1))
 	if spouse_id > 0:
 		companion_ids.append(spouse_id)
@@ -747,6 +853,22 @@ func _plan_social_groups(residents: Array) -> Dictionary:
 		selected_by_id[person_id] = identity
 		activity_by_id[person_id] = _activity_for_identity(identity)
 	var group_index: int = 0
+	for identity in residents:
+		var child_id: int = int(identity.get("id", -1))
+		if child_id <= 0 or used.has(child_id) or int(identity.get("age", 30)) >= 12:
+			continue
+		var activity: Dictionary = Dictionary(activity_by_id.get(child_id, {}))
+		var guardian_identity: Dictionary = {}
+		for raw_guardian_id in Array(activity.get("guardian_ids", [])):
+			var guardian_id: int = int(raw_guardian_id)
+			if guardian_id <= 0 or used.has(guardian_id) or not selected_by_id.has(guardian_id):
+				continue
+			guardian_identity = Dictionary(selected_by_id.get(guardian_id, {}))
+			if int(guardian_identity.get("age", 0)) >= 16:
+				break
+			guardian_identity = {}
+		if not guardian_identity.is_empty():
+			group_index = _register_social_group(groups, assignments, used, group_index, "family", [guardian_identity, identity], int(guardian_identity.get("id", -1)), activity_by_id)
 	var household_members: Dictionary = {}
 	for identity in residents:
 		var person_id: int = int(identity.get("id", -1))
@@ -892,13 +1014,13 @@ func _mode_for_activity(activity: Dictionary) -> String:
 
 
 func _allows_family_group_mode(mode: String) -> bool:
-	return ["home", "wander", "market", "plaza", "evening_stroll", "shopping", "coffee", "errand", "event_visit"].has(mode)
+	return ["home", "wander", "market", "plaza", "evening_stroll", "family_walk", "shopping", "coffee", "errand", "event_visit"].has(mode)
 
 
 func _activity_is_shareable(activity: Dictionary) -> bool:
 	if bool(activity.get("shareable", false)):
 		return true
-	return ["home", "wander", "market", "plaza", "evening_stroll", "shopping", "coffee", "errand", "event_visit"].has(_mode_for_activity(activity))
+	return ["home", "wander", "market", "plaza", "evening_stroll", "family_walk", "shopping", "coffee", "errand", "event_visit"].has(_mode_for_activity(activity))
 
 
 func _activities_can_share_group(activity_a: Dictionary, activity_b: Dictionary) -> bool:
@@ -987,7 +1109,8 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 	root.rotation.y = _rng.randf() * TAU
 	root.set_meta("identity", identity)
 	var ped_type: String = PERSON_TYPES[type_index]
-	var speed_scale: float = 0.88 if ped_type == "child" else 1.0
+	var age: int = int(identity.get("age", 30))
+	var speed_scale: float = 0.58 if age < 5 else (0.88 if ped_type == "child" else 1.0)
 	var initial_target: Vector3 = Vector3(activity.get("target", _pick_target_for_pedestrian({"identity": identity, "mode": mode}, spawn)))
 	if not group_info.is_empty() and str(group_info.get("role", "solo")) != "leader":
 		var follow_target: Variant = _group_follow_target({
@@ -1156,6 +1279,7 @@ func _attempt_dynamic_meetups() -> void:
 		return
 	if _frame_counter % maxi(2, crowd_update_slices * 2) != 0:
 		return
+	_rebuild_pedestrian_spatial_index()
 	var meetup_candidates: Array = _gather_meetup_candidate_indices()
 	if meetup_candidates.size() < 2:
 		return
@@ -1202,7 +1326,10 @@ func _find_meetup_partner(index: int, ped: Dictionary, candidate_indices: Array 
 	var root: Node3D = ped.get("root") as Node3D
 	if root == null or not is_instance_valid(root):
 		return -1
-	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_meetup_candidate_indices()
+	var candidate_lookup: Dictionary = _index_lookup(candidate_indices) if not candidate_indices.is_empty() else {}
+	var indices: Array = _nearby_pedestrian_indices(root.position, meetup_join_radius)
+	if indices.is_empty():
+		indices = candidate_indices if not candidate_indices.is_empty() else _gather_meetup_candidate_indices()
 	var activity: Dictionary = activity_cache.get(index, _activity_descriptor_for_ped(ped))
 	var root_position: Vector3 = root.position
 	var radius_sq: float = meetup_join_radius * meetup_join_radius
@@ -1211,6 +1338,8 @@ func _find_meetup_partner(index: int, ped: Dictionary, candidate_indices: Array 
 	for other_index_raw in indices:
 		var other_index: int = int(other_index_raw)
 		if other_index == index or other_index < 0 or other_index >= _pedestrians.size():
+			continue
+		if not candidate_lookup.is_empty() and not candidate_lookup.has(other_index):
 			continue
 		var other: Dictionary = _pedestrians[other_index]
 		var other_root: Node3D = other.get("root") as Node3D
@@ -1314,22 +1443,33 @@ func _update_conversations(delta: float) -> void:
 		var ped: Dictionary = _pedestrians[index]
 		ped["speech_cooldown"] = maxf(0.0, float(ped.get("speech_cooldown", 0.0)) - delta)
 		_pedestrians[index] = ped
+	_recycle_far_player_conversations()
 	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
 		var conversation: Dictionary = _active_conversations[conversation_index]
 		var lines: Array = conversation.get("lines", [])
 		if lines.is_empty():
 			_active_conversations.remove_at(conversation_index)
 			continue
+		if bool(conversation.get("is_player", false)) and bool(conversation.get("llm_pending", false)):
+			conversation["elapsed"] = 0.0
+			conversation["line_index"] = 0
+			_active_conversations[conversation_index] = conversation
+			continue
 		conversation["elapsed"] = float(conversation.get("elapsed", 0.0)) + delta
 		if float(conversation.get("elapsed", 0.0)) >= float(conversation.get("line_duration", conversation_line_duration)):
 			conversation["elapsed"] = 0.0
 			conversation["line_index"] = int(conversation.get("line_index", 0)) + 1
 			if int(conversation.get("line_index", 0)) >= lines.size():
+				if bool(conversation.get("is_player", false)):
+					conversation["line_index"] = maxi(0, lines.size() - 1)
+					_active_conversations[conversation_index] = conversation
+					continue
 				_active_conversations.remove_at(conversation_index)
 				continue
 		_active_conversations[conversation_index] = conversation
 	_next_conversation_delay = maxf(0.0, _next_conversation_delay - delta)
 	_player_conversation_delay = maxf(0.0, _player_conversation_delay - delta)
+	_rebuild_pedestrian_spatial_index()
 	var occupied_speakers: Dictionary = _conversation_speaker_lookup()
 	var conversation_candidates: Array = _gather_conversation_candidate_indices(occupied_speakers)
 	if _active_conversations.size() < 3 and _player_conversation_delay <= 0.0:
@@ -1367,14 +1507,17 @@ func _find_player_conversation_candidate(candidate_indices: Array = []) -> int:
 	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_conversation_candidate_indices(_conversation_speaker_lookup())
 	if indices.is_empty():
 		return -1
+	var candidate_lookup: Dictionary = _index_lookup(indices)
 	var player_position: Vector3 = _camera.global_position
 	var player_radius_sq: float = player_conversation_radius * player_conversation_radius
 	var viewport_center: Vector2 = get_viewport().get_visible_rect().size * 0.5
 	var best_index: int = -1
 	var best_score: float = -INF
-	for index in indices:
+	for index in _nearby_pedestrian_indices(player_position, player_conversation_radius):
 		var ped_index: int = int(index)
 		if ped_index < 0 or ped_index >= _pedestrians.size():
+			continue
+		if not candidate_lookup.has(ped_index):
 			continue
 		var ped: Dictionary = _pedestrians[ped_index]
 		var root: Node3D = ped.get("root") as Node3D
@@ -1415,12 +1558,34 @@ func trigger_player_conversation_for_person(person_id: int) -> bool:
 		var identity: Dictionary = ped.get("identity", {})
 		if int(identity.get("id", -1)) != person_id:
 			continue
-		if not _can_start_conversation(ped_index, ped):
-			return false
-		_start_player_conversation(ped_index, true)
-		_player_conversation_delay = _rng.randf_range(player_conversation_cooldown * 0.9, player_conversation_cooldown * 1.2)
-		return true
+		return trigger_player_conversation_for_pedestrian(ped_index)
 	return false
+
+
+func trigger_player_conversation_for_pedestrian(ped_index: int) -> bool:
+	if ped_index < 0 or ped_index >= _pedestrians.size():
+		return false
+	var ped: Dictionary = _pedestrians[ped_index]
+	if str(ped.get("type", "person")) == DOG_TYPE:
+		return false
+	var identity: Dictionary = ped.get("identity", {})
+	if identity.is_empty():
+		return false
+	var root: Node3D = ped.get("root") as Node3D
+	if root == null or not is_instance_valid(root):
+		return false
+	_remove_conversations_for_speaker(ped_index)
+	_recycle_player_conversation_slots_for(ped_index)
+	ped["speech_cooldown"] = 0.0
+	ped["pause_time"] = _player_interaction_lock_seconds
+	ped["player_lock_time"] = _player_interaction_lock_seconds
+	ped["target"] = root.position
+	ped["stuck_time"] = 0.0
+	_face_actor_toward_player(root, 1.0)
+	_pedestrians[ped_index] = ped
+	_start_player_conversation(ped_index, true, true)
+	_player_conversation_delay = _rng.randf_range(player_conversation_cooldown * 0.9, player_conversation_cooldown * 1.2)
+	return true
 
 
 func get_active_conversation_count() -> int:
@@ -1497,6 +1662,82 @@ func _conversation_speaker_lookup(player_only: bool = false) -> Dictionary:
 	return occupied
 
 
+func _remove_conversations_for_speaker(ped_index: int) -> void:
+	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
+		var conversation: Dictionary = _active_conversations[conversation_index]
+		for speaker_index in Array(conversation.get("speaker_indices", [])):
+			if int(speaker_index) == ped_index:
+				_active_conversations.remove_at(conversation_index)
+				break
+	_prune_openrouter_queue_for_active_conversations()
+
+
+func _recycle_player_conversation_slots_for(incoming_ped_index: int) -> void:
+	_recycle_far_player_conversations()
+	while _player_conversation_indices().size() >= _max_player_conversation_boxes:
+		var recycle_index: int = _oldest_recyclable_player_conversation_index(incoming_ped_index)
+		if recycle_index < 0:
+			break
+		_active_conversations.remove_at(recycle_index)
+	_prune_openrouter_queue_for_active_conversations()
+
+
+func _recycle_far_player_conversations() -> void:
+	if _camera == null or not is_instance_valid(_camera):
+		return
+	var max_distance_sq: float = _player_conversation_recycle_distance * _player_conversation_recycle_distance
+	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
+		var conversation: Dictionary = Dictionary(_active_conversations[conversation_index])
+		if not bool(conversation.get("is_player", false)):
+			continue
+		var speaker_index: int = _primary_speaker_index(conversation)
+		if speaker_index < 0 or speaker_index >= _pedestrians.size():
+			_active_conversations.remove_at(conversation_index)
+			continue
+		var ped: Dictionary = _pedestrians[speaker_index]
+		var root: Node3D = ped.get("root") as Node3D
+		if root == null or not is_instance_valid(root):
+			_active_conversations.remove_at(conversation_index)
+			continue
+		if root.global_position.distance_squared_to(_camera.global_position) > max_distance_sq:
+			_active_conversations.remove_at(conversation_index)
+	_prune_openrouter_queue_for_active_conversations()
+
+
+func _player_conversation_indices() -> Array[int]:
+	var result: Array[int] = []
+	for conversation_index in range(_active_conversations.size()):
+		if bool(Dictionary(_active_conversations[conversation_index]).get("is_player", false)):
+			result.append(conversation_index)
+	return result
+
+
+func _oldest_recyclable_player_conversation_index(incoming_ped_index: int) -> int:
+	for conversation_index in _player_conversation_indices():
+		var conversation: Dictionary = Dictionary(_active_conversations[int(conversation_index)])
+		if _primary_speaker_index(conversation) != incoming_ped_index:
+			return int(conversation_index)
+	return -1
+
+
+func _primary_speaker_index(conversation: Dictionary) -> int:
+	var speakers: Array = Array(conversation.get("speaker_indices", []))
+	if speakers.is_empty():
+		return -1
+	return int(speakers[0])
+
+
+func _prune_openrouter_queue_for_active_conversations() -> void:
+	if _openrouter_pending_player_requests.is_empty():
+		return
+	var active_speakers: Dictionary = _player_conversation_speaker_lookup()
+	var pruned: Array[int] = []
+	for ped_index in _openrouter_pending_player_requests:
+		if active_speakers.has(int(ped_index)) and not pruned.has(int(ped_index)):
+			pruned.append(int(ped_index))
+	_openrouter_pending_player_requests = pruned
+
+
 func _gather_conversation_candidate_indices(occupied_speakers: Dictionary = {}) -> Array:
 	var candidates: Array = []
 	for index in range(_pedestrians.size()):
@@ -1510,7 +1751,10 @@ func _find_conversation_partner(index: int, ped: Dictionary, candidate_indices: 
 	var root: Node3D = ped.get("root") as Node3D
 	if root == null or not is_instance_valid(root):
 		return -1
-	var indices: Array = candidate_indices if not candidate_indices.is_empty() else _gather_conversation_candidate_indices(_conversation_speaker_lookup())
+	var candidate_lookup: Dictionary = _index_lookup(candidate_indices) if not candidate_indices.is_empty() else {}
+	var indices: Array = _nearby_pedestrian_indices(root.position, conversation_radius)
+	if indices.is_empty():
+		indices = candidate_indices if not candidate_indices.is_empty() else _gather_conversation_candidate_indices(_conversation_speaker_lookup())
 	var root_position: Vector3 = root.position
 	var radius_sq: float = conversation_radius * conversation_radius
 	var best_index: int = -1
@@ -1518,6 +1762,8 @@ func _find_conversation_partner(index: int, ped: Dictionary, candidate_indices: 
 	for other_index_raw in indices:
 		var other_index: int = int(other_index_raw)
 		if other_index == index or other_index < 0 or other_index >= _pedestrians.size():
+			continue
+		if not candidate_lookup.is_empty() and not candidate_lookup.has(other_index):
 			continue
 		var other: Dictionary = _pedestrians[other_index]
 		var other_root: Node3D = other.get("root") as Node3D
@@ -1535,6 +1781,54 @@ func _find_conversation_partner(index: int, ped: Dictionary, candidate_indices: 
 	if best_index >= 0 and _rng.randf() <= conversation_share:
 		return best_index
 	return -1
+
+
+func _rebuild_pedestrian_spatial_index() -> void:
+	if _pedestrian_spatial_frame == _frame_counter:
+		return
+	_pedestrian_spatial_index.clear()
+	var cell_size: float = maxf(1.0, _pedestrian_spatial_cell_size)
+	for index in range(_pedestrians.size()):
+		var ped: Dictionary = _pedestrians[index]
+		var root: Node3D = ped.get("root") as Node3D
+		if root == null or not is_instance_valid(root):
+			continue
+		var cell := _pedestrian_cell_for_position(root.position, cell_size)
+		var bucket: Array = _pedestrian_spatial_index.get(cell, [])
+		bucket.append(index)
+		_pedestrian_spatial_index[cell] = bucket
+	_pedestrian_spatial_frame = _frame_counter
+
+
+func _nearby_pedestrian_indices(position: Vector3, radius: float) -> Array:
+	_rebuild_pedestrian_spatial_index()
+	if _pedestrian_spatial_index.is_empty():
+		return []
+	var cell_size: float = maxf(1.0, _pedestrian_spatial_cell_size)
+	var min_cell := _pedestrian_cell_for_position(position - Vector3(radius, 0.0, radius), cell_size)
+	var max_cell := _pedestrian_cell_for_position(position + Vector3(radius, 0.0, radius), cell_size)
+	var seen: Dictionary = {}
+	var indices: Array = []
+	for cx in range(min_cell.x, max_cell.x + 1):
+		for cz in range(min_cell.y, max_cell.y + 1):
+			for ped_index in _pedestrian_spatial_index.get(Vector2i(cx, cz), []):
+				var resolved_index: int = int(ped_index)
+				if seen.has(resolved_index):
+					continue
+				seen[resolved_index] = true
+				indices.append(resolved_index)
+	return indices
+
+
+func _pedestrian_cell_for_position(position: Vector3, cell_size: float) -> Vector2i:
+	return Vector2i(int(floor(position.x / cell_size)), int(floor(position.z / cell_size)))
+
+
+func _index_lookup(indices: Array) -> Dictionary:
+	var lookup: Dictionary = {}
+	for index in indices:
+		lookup[int(index)] = true
+	return lookup
 
 
 func _conversation_pair_score(ped: Dictionary, other: Dictionary, distance: float) -> float:
@@ -1563,15 +1857,15 @@ func _start_conversation(index_a: int, index_b: int) -> void:
 	_start_conversation_from_lines(index_a, ped_a, index_b, ped_b, lines, conversation_line_duration, false)
 
 
-func _start_player_conversation(ped_index: int, use_llm: bool = false) -> void:
+func _start_player_conversation(ped_index: int, use_llm: bool = false, force_llm_restart: bool = false) -> void:
 	if ped_index < 0 or ped_index >= _pedestrians.size():
 		return
 	var ped: Dictionary = _pedestrians[ped_index]
 	var lines: Array = _conversation_lines_for_player(ped_index, ped)
-	_start_conversation_from_lines(ped_index, ped, -1, {}, lines, conversation_line_duration, true, use_llm)
+	_start_conversation_from_lines(ped_index, ped, -1, {}, lines, conversation_line_duration, true, use_llm, force_llm_restart)
 
 
-func _start_conversation_from_lines(index_a: int, ped_a: Dictionary, index_b: int, ped_b: Dictionary, lines: Array, line_duration: float, is_player_conversation: bool, use_llm: bool = false) -> void:
+func _start_conversation_from_lines(index_a: int, ped_a: Dictionary, index_b: int, ped_b: Dictionary, lines: Array, line_duration: float, is_player_conversation: bool, use_llm: bool = false, force_llm_restart: bool = false) -> void:
 	if lines.is_empty():
 		return
 	var speakers: Array = [index_a]
@@ -1596,7 +1890,7 @@ func _start_conversation_from_lines(index_a: int, ped_a: Dictionary, index_b: in
 		ped_b["speech_cooldown"] = maxf(float(ped_b.get("speech_cooldown", 0.0)), 10.0)
 		_pedestrians[index_b] = ped_b
 	if is_player_conversation and use_llm:
-		var started_request: bool = _request_openrouter_player_lines(index_a, ped_a)
+		var started_request: bool = _request_openrouter_player_lines(index_a, ped_a, force_llm_restart)
 		if started_request:
 			conversation["llm_pending"] = true
 			_active_conversations[_active_conversations.size() - 1] = conversation
@@ -1646,39 +1940,160 @@ func _conversation_lines_for_player(index_a: int, ped_a: Dictionary) -> Array:
 	var identity: Dictionary = ped_a.get("identity", {})
 	var first_name: String = str(identity.get("first_name", identity.get("full_name", "Neighbor"))).split(" ")[0]
 	var mode: String = str(ped_a.get("mode", "wander"))
+	var person_id: int = int(identity.get("id", -1))
+	var remembered_lines: Array = _player_dialogue_memory.get(person_id, [])
+	if not remembered_lines.is_empty():
+		return _sequence_lines(_rotate_remembered_lines(remembered_lines, person_id), index_a, -1)
+	var context: Dictionary = _conversation_context_for_ped(ped_a)
+	var activity_label: String = _activity_phrase_for_context(context, mode)
+	var memory_line: String = _memory_phrase_for_context(context)
 	var lines: Array[String] = []
 	match mode:
 		"coffee":
 			lines = [
-				"Hey—want to check out the café?",
-				"They've actually got open tables right now.",
+				"Hey, I'm %s. I was just heading for coffee." % first_name,
+				activity_label,
 				"I'm %s, by the way." % first_name
 			]
 		"shopping", "market", "errand":
 			lines = [
-				"You made it just before the stalls close.",
-				"Best bread stand is halfway down this block.",
-				"If you're browsing, it's a good day for it."
+				"Hey, I'm %s. I'm out on an errand." % first_name,
+				activity_label,
+				memory_line
 			]
 		"event_visit":
 			lines = [
 				"You here for the little crowd gathering too?",
-				"Something interesting always starts in the square.",
-				"Feels like the whole block noticed."
+				activity_label,
+				memory_line
 			]
 		"plaza", "evening_stroll":
 			lines = [
-				"Nice timing—this street's best around now.",
-				"If you keep going, the plaza opens up ahead.",
-				"People tend to linger there when it's lively."
+				"Nice timing, I'm %s." % first_name,
+				activity_label,
+				memory_line
 			]
 		_:
 			lines = [
-				"Hey there.",
-				"You look new to this stretch of town.",
-				"The plaza's the busiest spot if you're looking for something happening."
+				"Hey there, I'm %s." % first_name,
+				activity_label,
+				memory_line
 			]
 	return _sequence_lines(lines, index_a, -1)
+
+
+func _conversation_context_for_ped(ped: Dictionary) -> Dictionary:
+	var identity: Dictionary = ped.get("identity", {})
+	var person_id: int = int(identity.get("id", -1))
+	if person_id > 0 and _population != null and _population.has_method("get_resident_conversation_context"):
+		var context: Dictionary = _population.call("get_resident_conversation_context", person_id)
+		if not context.is_empty():
+			return context
+	return {
+		"person": identity.duplicate(true),
+		"activity": {
+			"mode": str(ped.get("mode", "wander")),
+			"goal": str(ped.get("goal", ped.get("mode", "wander"))),
+			"label": str(ped.get("mode", "wander")).replace("_", " ")
+		},
+		"household": {},
+		"top_bonds": [],
+		"recent_events": []
+	}
+
+
+func _activity_phrase_for_context(context: Dictionary, fallback_mode: String) -> String:
+	var activity: Dictionary = Dictionary(context.get("activity", {}))
+	var mode: String = str(activity.get("mode", fallback_mode)).replace("_", " ")
+	var goal: String = str(activity.get("goal", mode))
+	var venue_type: String = str(activity.get("venue_type", ""))
+	if venue_type != "":
+		return "I'm on my way toward the %s." % venue_type.replace("_", " ")
+	if goal != "" and goal != mode:
+		return "I'm out for %s right now." % goal.replace("_", " ")
+	return "I'm %s around here right now." % mode
+
+
+func _memory_phrase_for_context(context: Dictionary) -> String:
+	var events: Array = context.get("recent_events", [])
+	if not events.is_empty():
+		var event: Dictionary = Dictionary(events[0])
+		return str(event.get("text", "This block has had a lot going on.")).left(82)
+	var bonds: Array = context.get("top_bonds", [])
+	if not bonds.is_empty():
+		var bond: Dictionary = Dictionary(bonds[0])
+		return "I know %s from around here." % str(bond.get("target_name", "a neighbor"))
+	var household: Dictionary = Dictionary(context.get("household", {}))
+	var member_names: Array = household.get("member_names", [])
+	if not member_names.is_empty():
+		return "I live nearby with %s." % str(member_names[0])
+	return "The plaza is the easiest place to get your bearings."
+
+
+func _prompt_context_summary(context: Dictionary, ped: Dictionary) -> String:
+	var identity: Dictionary = ped.get("identity", {})
+	var person: Dictionary = Dictionary(context.get("person", identity))
+	var activity: Dictionary = Dictionary(context.get("activity", {}))
+	var character: Dictionary = Dictionary(person.get("character", identity.get("character", {})))
+	var household: Dictionary = Dictionary(context.get("household", {}))
+	var lines: Array[String] = [
+		"Name: %s" % str(person.get("full_name", identity.get("full_name", "Neighbor"))),
+		"Age: %s" % str(person.get("age", identity.get("age", "?"))),
+		"Occupation: %s" % str(person.get("occupation", identity.get("occupation", "local"))),
+		"Character: %s; values %s; motivation %s" % [str(character.get("trait", "ordinary")), str(character.get("value", "routine")), str(character.get("motivation", "get through the day"))],
+		"Current activity: %s" % str(activity.get("label", activity.get("mode", ped.get("mode", "wander")))),
+		"Goal: %s" % str(activity.get("goal", ped.get("goal", "walk"))),
+		"Venue: %s" % str(activity.get("venue_type", "none")),
+		"Household: %s with %s members" % [str(household.get("kind", "home")), str(household.get("member_count", 0))]
+	]
+	var member_names: Array = household.get("member_names", [])
+	if not member_names.is_empty():
+		lines.append("Household names: %s" % _join_variant_strings(member_names, 4))
+	var bonds: Array = context.get("top_bonds", [])
+	if not bonds.is_empty():
+		var bond_phrases: Array[String] = []
+		for bond in bonds:
+			var bond_dict: Dictionary = Dictionary(bond)
+			bond_phrases.append("%s (%s %s)" % [str(bond_dict.get("target_name", "neighbor")), str(bond_dict.get("kind", "social")), str(bond_dict.get("score", 0))])
+		lines.append("Relationships: %s" % _join_variant_strings(bond_phrases, 3))
+	var events: Array = context.get("recent_events", [])
+	if not events.is_empty():
+		var event_phrases: Array[String] = []
+		for event in events:
+			event_phrases.append(str(Dictionary(event).get("text", "event")))
+		lines.append("Recent memory: %s" % _join_variant_strings(event_phrases, 2))
+	return "\n".join(lines)
+
+
+func _rotate_remembered_lines(raw_lines: Array, person_id: int) -> Array[String]:
+	var lines: Array[String] = []
+	for entry in raw_lines:
+		var text: String = str(entry).strip_edges()
+		if text != "":
+			lines.append(text)
+	if lines.size() <= 1:
+		return lines
+	var offset: int = _positive_modulo(_frame_counter + person_id, lines.size())
+	var rotated: Array[String] = []
+	for index in range(lines.size()):
+		rotated.append(lines[(index + offset) % lines.size()])
+	return rotated
+
+
+func _join_variant_strings(items: Array, limit: int = 4) -> String:
+	var parts: Array[String] = []
+	for item in items:
+		parts.append(str(item))
+		if parts.size() >= limit:
+			break
+	return ", ".join(parts)
+
+
+func _positive_modulo(value: int, count: int) -> int:
+	if count <= 0:
+		return 0
+	var mod: int = value % count
+	return mod + count if mod < 0 else mod
 
 
 func _sequence_lines(lines: Array[String], index_a: int, index_b: int) -> Array:
@@ -1698,18 +2113,18 @@ func _mode_supports_conversation(mode: String) -> bool:
 	return ["wander", "plaza", "coffee", "shopping", "market", "errand", "evening_stroll", "event_visit"].has(mode)
 
 
-func _request_openrouter_player_lines(ped_index: int, ped: Dictionary) -> bool:
-	if not enable_llm_conversations or _openrouter_request == null or _openrouter_request_in_flight:
+func _request_openrouter_player_lines(ped_index: int, ped: Dictionary, force_restart: bool = false) -> bool:
+	if not _ensure_openrouter_request():
 		return false
+	if _openrouter_request_in_flight:
+		_queue_openrouter_player_request(ped_index)
+		return true
 	if _openrouter_api_key == "":
 		push_warning("OpenRouter conversation generation skipped: %s missing" % OPENROUTER_ENV_KEY)
 		return false
 		
-	var identity: Dictionary = ped.get("identity", {})
-	var prompt: String = "Write exactly 3 short lines of ambient NPC dialogue spoken by one city pedestrian to a nearby player in a simulation game. Keep each line under 70 characters. Tone: natural, brief, street-level, no meta commentary. Mode: %s. Speaker name: %s. Return exactly 3 plain text lines, one line per line, with no numbering, no bullets, no JSON, and no markdown." % [
-		str(ped.get("mode", "wander")),
-		str(identity.get("first_name", identity.get("full_name", "Neighbor")))
-	]
+	var context: Dictionary = _conversation_context_for_ped(ped)
+	var prompt: String = "Write exactly 3 short lines spoken by this city resident to a nearby player in a simulation game. Keep each line under 70 characters. Tone: natural, brief, street-level, no meta commentary. Use at least one concrete context detail if it fits. Return exactly 3 plain text lines, one line per line, with no numbering, no bullets, no JSON, and no markdown.\n\nResident context:\n%s" % _prompt_context_summary(context, ped)
 	var payload := {
 		"model": openrouter_model,
 		"messages": [
@@ -1747,6 +2162,45 @@ func _request_openrouter_player_lines(ped_index: int, ped: Dictionary) -> bool:
 	return true
 
 
+func _queue_openrouter_player_request(ped_index: int) -> void:
+	if ped_index < 0 or _openrouter_pending_player_requests.has(ped_index):
+		return
+	var active_ped_index: int = int(_openrouter_request.get_meta("conversation_ped_index", -1)) if _openrouter_request != null else -1
+	if active_ped_index == ped_index:
+		return
+	_openrouter_pending_player_requests.append(ped_index)
+
+
+func _start_next_openrouter_player_request() -> void:
+	if _openrouter_request_in_flight:
+		return
+	while not _openrouter_pending_player_requests.is_empty():
+		var next_ped_index: int = int(_openrouter_pending_player_requests.pop_front())
+		if next_ped_index < 0 or next_ped_index >= _pedestrians.size():
+			continue
+		var ped: Dictionary = _pedestrians[next_ped_index]
+		var speakers: Dictionary = _player_conversation_speaker_lookup()
+		if not speakers.has(next_ped_index):
+			continue
+		if _request_openrouter_player_lines(next_ped_index, ped, false):
+			return
+
+
+func _ensure_openrouter_request() -> bool:
+	if not enable_llm_conversations:
+		return false
+	if _openrouter_api_key == "":
+		_openrouter_api_key = OS.get_environment(OPENROUTER_ENV_KEY).strip_edges()
+	if _openrouter_request != null:
+		return true
+	_openrouter_request = HTTPRequest.new()
+	_openrouter_request.name = "OpenRouterRequest"
+	_openrouter_request.timeout = openrouter_timeout_seconds
+	_openrouter_request.request_completed.connect(_on_openrouter_request_completed)
+	add_child(_openrouter_request)
+	return true
+
+
 func _on_openrouter_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	_openrouter_request_in_flight = false
 	print("OpenRouter conversation response -> result %d status %d" % [result, response_code])
@@ -1754,19 +2208,23 @@ func _on_openrouter_request_completed(result: int, response_code: int, _headers:
 	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
 		_finalize_openrouter_player_lines(ped_index, [], "http_error")
 		push_warning("OpenRouter conversation response failed: result=%d status=%d body=%s" % [result, response_code, body.get_string_from_utf8().left(240)])
+		_start_next_openrouter_player_request()
 		return
 	if ped_index < 0 or ped_index >= _pedestrians.size():
 		print("OpenRouter generated -> ped %d: ZERO_MSG (ped gone)" % ped_index)
+		_start_next_openrouter_player_request()
 		return
 	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
 	if typeof(parsed) != TYPE_DICTIONARY:
 		_finalize_openrouter_player_lines(ped_index, [], "bad_body")
 		push_warning("OpenRouter conversation response was not a dictionary: %s" % body.get_string_from_utf8().left(240))
+		_start_next_openrouter_player_request()
 		return
 	var choices: Array = Dictionary(parsed).get("choices", [])
 	if choices.is_empty():
 		_finalize_openrouter_player_lines(ped_index, [], "no_choices")
 		push_warning("OpenRouter conversation response had no choices")
+		_start_next_openrouter_player_request()
 		return
 	var choice: Dictionary = Dictionary(choices[0])
 	var message: Dictionary = Dictionary(choice.get("message", {}))
@@ -1786,15 +2244,27 @@ func _on_openrouter_request_completed(result: int, response_code: int, _headers:
 			push_warning("OpenRouter hit max_tokens before producing visible dialogue; using local fallback lines")
 		else:
 			push_warning("OpenRouter conversation content was not parseable as lines")
+		_start_next_openrouter_player_request()
 		return
 	_finalize_openrouter_player_lines(ped_index, lines, "ok")
+	_start_next_openrouter_player_request()
 
 
 func _finalize_openrouter_player_lines(ped_index: int, lines: Array[String], status: String) -> void:
+	if ped_index < 0 or ped_index >= _pedestrians.size():
+		print("OpenRouter generated -> ped %d: ZERO_MSG (%s ped_gone)" % [ped_index, status])
+		return
 	if lines.is_empty():
 		print("OpenRouter generated -> ped %d: ZERO_MSG (%s)" % [ped_index, status])
-	else:
-		print("OpenRouter generated -> ped %d: %s" % [ped_index, _join_log_lines(lines)])
+		_clear_pending_player_conversation(ped_index)
+		return
+	var ped: Dictionary = _pedestrians[ped_index]
+	var identity: Dictionary = ped.get("identity", {})
+	var person_id: int = int(identity.get("id", -1))
+	if person_id > 0:
+		_player_dialogue_memory[person_id] = lines.duplicate()
+	var incoming_lines: Array = _sequence_lines(lines, ped_index, -1)
+	var updated_existing: bool = false
 	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
 		var conversation: Dictionary = _active_conversations[conversation_index]
 		if not bool(conversation.get("is_player", false)):
@@ -1804,11 +2274,56 @@ func _finalize_openrouter_player_lines(ped_index: int, lines: Array[String], sta
 			continue
 		conversation["llm_pending"] = false
 		if not lines.is_empty():
-			conversation["lines"] = _sequence_lines(lines, ped_index, -1)
-			conversation["line_index"] = 0
+			var existing_lines: Array = Array(conversation.get("lines", []))
+			var was_waiting_for_first_lines: bool = existing_lines.size() <= 1 and str(Dictionary(existing_lines[0] if not existing_lines.is_empty() else {}).get("text", "")) == "..."
+			if was_waiting_for_first_lines:
+				conversation["lines"] = incoming_lines
+				conversation["line_index"] = 0
+			else:
+				existing_lines.append_array(incoming_lines)
+				conversation["lines"] = existing_lines
+				conversation["line_index"] = clampi(int(conversation.get("line_index", 0)), 0, maxi(0, existing_lines.size() - 1))
 			conversation["elapsed"] = 0.0
+			conversation["line_duration"] = conversation_line_duration
 		_active_conversations[conversation_index] = conversation
+		updated_existing = true
 		break
+	if not updated_existing:
+		print("OpenRouter generated -> ped %d: DROPPED (%s conversation_recycled)" % [ped_index, status])
+		return
+	_focus_player_conversation_speaker(ped_index)
+	print("OpenRouter displayed -> ped %d: %s" % [ped_index, _join_log_lines(lines)])
+
+
+func _clear_pending_player_conversation(ped_index: int) -> void:
+	for conversation_index in range(_active_conversations.size() - 1, -1, -1):
+		var conversation: Dictionary = _active_conversations[conversation_index]
+		if not bool(conversation.get("is_player", false)):
+			continue
+		var speakers: Array = conversation.get("speaker_indices", [])
+		if not speakers.is_empty() and int(speakers[0]) == ped_index:
+			conversation["llm_pending"] = false
+			_active_conversations[conversation_index] = conversation
+			return
+
+
+func _focus_player_conversation_speaker(ped_index: int) -> void:
+	if ped_index < 0 or ped_index >= _pedestrians.size():
+		return
+	var ped: Dictionary = _pedestrians[ped_index]
+	var root: Node3D = ped.get("root") as Node3D
+	if root == null or not is_instance_valid(root):
+		return
+	ped["pause_time"] = maxf(float(ped.get("pause_time", 0.0)), _player_dialogue_display_seconds)
+	ped["speech_cooldown"] = maxf(float(ped.get("speech_cooldown", 0.0)), _player_dialogue_display_seconds)
+	ped["player_lock_time"] = maxf(float(ped.get("player_lock_time", 0.0)), _player_dialogue_display_seconds)
+	ped["target"] = root.position
+	_pedestrians[ped_index] = ped
+	if _camera != null and is_instance_valid(_camera):
+		var to_camera := _camera.global_position - root.global_position
+		to_camera.y = 0.0
+		if to_camera.length_squared() > 0.001:
+			root.rotation.y = atan2(to_camera.x, to_camera.z)
 
 
 func _join_log_lines(lines: Array[String]) -> String:
@@ -2043,7 +2558,7 @@ func _person_type_for_identity(identity: Dictionary) -> int:
 	if identity.is_empty():
 		return _rng.randi_range(0, PERSON_SCENE_PATHS.size() - 1)
 	var age: int = int(identity.get("age", 30))
-	if age < 16:
+	if age < 12:
 		return 2
 	var gender: String = str(identity.get("gender", "male"))
 	return 1 if gender == "female" else 0
@@ -2057,6 +2572,8 @@ func _spawn_position_for_identity(identity: Dictionary) -> Vector3:
 
 
 func _activity_for_identity(identity: Dictionary) -> Dictionary:
+	if identity.has("_activity"):
+		return Dictionary(identity.get("_activity", {})).duplicate(true)
 	if _population != null and not identity.is_empty() and _population.has_method("get_person_activity"):
 		return _population.call("get_person_activity", int(identity.get("id", -1)))
 	return {}
@@ -2072,7 +2589,7 @@ func _pick_target_for_pedestrian(ped: Dictionary, from_position: Vector3) -> Vec
 			var activity: Dictionary = _population.call("get_person_activity", int(identity.get("id", -1)))
 			if not activity.is_empty():
 				var mode: String = str(activity.get("mode", "wander"))
-				if mode == "plaza" or mode == "evening_stroll" or mode == "event_visit":
+				if mode == "plaza" or mode == "evening_stroll" or mode == "family_walk" or mode == "event_visit":
 					preferred_walk_kind = "square"
 				var directed_target: Vector3 = activity.get("target", from_position)
 				if Vector2(directed_target.x - from_position.x, directed_target.z - from_position.z).length() >= 1.2:
@@ -2096,7 +2613,9 @@ func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mo
 		return _rng.randf_range(dog_walk_speed_min, dog_walk_speed_max)
 	var base_speed: float = _rng.randf_range(walk_speed_min, walk_speed_max)
 	var age: int = int(identity.get("age", 30))
-	if age < 16:
+	if age < 5:
+		base_speed *= 0.55
+	elif age < 12:
 		base_speed *= 1.06
 	elif age >= 68:
 		base_speed *= 0.82
@@ -2113,6 +2632,8 @@ func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mo
 			base_speed *= 0.82
 		"market":
 			base_speed *= 0.94
+		"family_walk":
+			base_speed *= 0.62
 		"event_visit":
 			base_speed *= 0.74
 		"plaza":

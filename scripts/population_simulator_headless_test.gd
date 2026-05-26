@@ -37,6 +37,25 @@ func _init() -> void:
 	assert(String(activity_before.get("motivation", "")).length() > 0)
 	assert(String(activity_before.get("goal", "")).length() > 0)
 	assert(int(activity_before.get("initiator_id", -1)) == int(resident.get("id", -1)))
+	assert(Dictionary(resident.get("character", {})).has("trait"))
+	var visual_intents: Array = sim.get_visible_resident_intents(18)
+	assert(not visual_intents.is_empty())
+	var visual_ids: Dictionary = {}
+	for intent in visual_intents:
+		var visual_identity: Dictionary = Dictionary(Dictionary(intent).get("identity", {}))
+		visual_ids[int(visual_identity.get("id", -1))] = true
+	for intent in visual_intents:
+		var visual_identity: Dictionary = Dictionary(Dictionary(intent).get("identity", {}))
+		if int(visual_identity.get("age", 0)) >= 12:
+			continue
+		var visual_activity: Dictionary = Dictionary(Dictionary(intent).get("activity", {}))
+		assert(bool(visual_activity.get("requires_guardian", false)))
+		var has_guardian: bool = false
+		for guardian_id in Array(visual_activity.get("guardian_ids", [])):
+			if visual_ids.has(int(guardian_id)):
+				has_guardian = true
+				break
+		assert(has_guardian)
 	var bonds: Array = sim.get_social_bonds(int(resident.get("id", -1)), 4)
 	assert(not bonds.is_empty())
 	var married_found: bool = false

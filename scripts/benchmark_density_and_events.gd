@@ -17,6 +17,7 @@ func _init() -> void:
 	var city := CityGenerator.new()
 	city.name = "City"
 	city.regenerate_on_ready = false
+	city.seed_value = 12345
 	root.add_child(city)
 	city.generate_city()
 
