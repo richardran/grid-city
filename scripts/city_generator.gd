@@ -490,16 +490,16 @@ func _apply_emissive_profile(material: StandardMaterial3D, profile: Dictionary, 
 			material.emission = base_color
 			material.emission_energy_multiplier = lamp_pool_mix * 0.92
 		_:
-			# Evening: all windows warm-lit. Late night: random windows go dark.
+			# Evening: all windows warm-lit. Late night: random windows go dark after ~10pm.
 			var seed_hash: float = fmod(float(profile.get("seed", 1) + profile_index * 7919) * 0.6180339887 + 0.144269504, 1.0)
 			var warm_amber := Color(1.0, 0.60, 0.20)
 			material.albedo_color = Color(0.55, 0.55, 0.58, 0.35)
 			material.emission_enabled = true
-			if night > 0.3:
-				# Night depth: 0 at dusk (night=0.3), 1 at midnight (night=1.0)
-				var depth: float = clampf((night - 0.3) / 0.7, 0.0, 1.0)
-				# Threshold drops from 1.0 (all lit) toward 0.2 (most dark) as night deepens
-				var threshold: float = lerpf(1.0, 0.2, depth)
+			if night > 0.6:
+				# Night depth: 0 at ~9:30pm (night=0.6), 1 at midnight (night=1.0)
+				var depth: float = clampf((night - 0.6) / 0.4, 0.0, 1.0)
+				# Threshold drops from 1.0 (all on) toward 0.15 (few lit) after 10pm
+				var threshold: float = lerpf(1.0, 0.15, depth)
 				material.emission = warm_amber
 				if seed_hash < threshold:
 					material.emission_energy_multiplier = 0.6 + seed_hash * 0.4

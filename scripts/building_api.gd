@@ -579,9 +579,9 @@ static func _box_mesh(size: Vector3) -> BoxMesh:
 
 static func _material(kind: String, palette: String = "default", seed: int = 0) -> StandardMaterial3D:
 	var key := "%s|%s" % [palette, kind]
-	# Glass materials need per-module variation for random window darkening
+	# Glass materials need per-module variation for random window darkening (20 variants)
 	if kind == "glass" and seed != 0:
-		key = "%s|glass|%d" % [palette, seed]
+		key = "%s|glass|%d" % [palette, seed % 20 + 1]
 	if _material_cache.has(key):
 		return _material_cache[key]
 	var material := StandardMaterial3D.new()
@@ -646,9 +646,9 @@ static func _apply_glass_lighting(material: StandardMaterial3D, palette: String,
 	var warm_mix: float = clampf(0.60 + warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
 	material.albedo_color = Color(0.55, 0.55, 0.58, 0.35)
 	material.emission_enabled = true
-	if night > 0.3:
-		var depth: float = clampf((night - 0.3) / 0.7, 0.0, 1.0)
-		var threshold: float = lerpf(1.0, 0.2, depth)
+	if night > 0.6:
+		var depth: float = clampf((night - 0.6) / 0.4, 0.0, 1.0)
+		var threshold: float = lerpf(1.0, 0.15, depth)
 		var seed_hash: float = fmod(float(seed) * 0.6180339887 + 0.144269504, 1.0)
 		material.emission = Color(1.0, 0.60, 0.20)
 		if seed_hash < threshold:
