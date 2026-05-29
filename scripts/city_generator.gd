@@ -124,6 +124,8 @@ var _planter_material: StandardMaterial3D
 var _foliage_material: StandardMaterial3D
 var _vine_material: StandardMaterial3D
 var _lamp_post_material: StandardMaterial3D
+var _flower_materials: Array[StandardMaterial3D] = []
+var _bush_material: StandardMaterial3D
 var _flower_scenes: Array[PackedScene] = []
 var _planter_bush_scene: PackedScene
 var _cascade_plant_scene: PackedScene
@@ -140,7 +142,7 @@ func _ready() -> void:
 func generate_city() -> void:
 	if _house_body_materials.is_empty():
 		_setup_materials()
-	if _flower_scenes.is_empty() and _planter_bush_scene == null and _cascade_plant_scene == null:
+	if _flower_materials.is_empty():
 		_setup_foliage_assets()
 	_ensure_runtime_seed()
 	_rng.seed = seed_value
@@ -167,6 +169,102 @@ func generate_city() -> void:
 	_create_blocks()
 	_create_street_lamps()
 	apply_lighting_state(_default_lighting_state())
+
+
+func _merge_meshes_by_material() -> void:
+	## Groups all MeshInstance3D under _generated_root by material,
+	## merges their vertex data into one ArrayMesh per material,
+	## then replaces the individual instances with the merged mesh.
+	if _generated_root == null or not is_instance_valid(_generated_root):
+		return
+
+	# Collect all MeshInstance3D grouped by material
+	var by_material: Dictionary = {}  # Material -> Array[MeshInstance3D]
+	var all_instances: Array[MeshInstance3D] = []
+	_collect_mesh_instances(_generated_root, by_material, all_instances)
+
+	if all_instances.is_empty():
+		return
+
+	var total_before: int = all_instances.size()
+	var merged_count: int = 0
+
+	for mat in by_material:
+		var instances: Array = by_material[mat]
+		if instances.size() < 3:
+			# Don't bother merging if fewer than 3 instances — overhead not worth it
+			continue
+
+		var mat_ref: Material = mat as Material
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+		var merged_any: bool = false
+		for mi in instances:
+			var mi_node: MeshInstance3D = mi as MeshInstance3D
+			if mi_node == null or not is_instance_valid(mi_node):
+				continue
+			var mesh: Mesh = mi_node.mesh
+			if mesh == null:
+				continue
+			# Get the global transform for vertex positioning
+			var xform: Transform3D = mi_node.global_transform
+			# Append mesh surfaces
+			for surf_idx in mesh.get_surface_count():
+				var arr: Array = mesh.surface_get_arrays(surf_idx)
+				if arr.is_empty():
+					continue
+				# Apply transform to vertices
+				var verts: Array = arr[Mesh.ARRAY_VERTEX]
+				for vi in range(verts.size()):
+					verts[vi] = xform * (verts[vi] as Vector3)
+				st.append_from(mesh, surf_idx, xform)
+				merged_any = true
+
+		if not merged_any:
+			continue
+
+		# Generate merged mesh
+		st.index()
+		var merged_mesh: ArrayMesh = st.commit()
+		if merged_mesh == null:
+			continue
+
+		# Create a single MeshInstance3D for this material
+		var merged_node := MeshInstance3D.new()
+		merged_node.mesh = merged_mesh
+		merged_node.material_override = mat_ref
+		merged_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_generated_root.add_child(merged_node)
+
+		# Hide originals (keep them to maintain scene tree structure for other code)
+		for mi in instances:
+			var mi_node: MeshInstance3D = mi as MeshInstance3D
+			if mi_node != null and is_instance_valid(mi_node):
+				mi_node.visible = false
+
+		merged_count += instances.size()
+
+	var kept: int = total_before - merged_count
+	print("Mesh merge: %d -> %d group meshes + %d unmerged = %d total (%.0f%% reduction)" % [
+		total_before, by_material.size(), kept, by_material.size() + kept,
+		100.0 * (1.0 - float(by_material.size() + kept) / float(maxi(1, total_before)))
+	])
+
+
+func _collect_mesh_instances(node: Node, by_material: Dictionary, all: Array[MeshInstance3D]) -> void:
+	if node is MeshInstance3D:
+		var mi: MeshInstance3D = node as MeshInstance3D
+		all.append(mi)
+		var mat: Material = mi.material_override
+		if mat == null:
+			mat = mi.mesh.surface_get_material(0) if mi.mesh != null and mi.mesh.get_surface_count() > 0 else null
+		if mat != null:
+			if not by_material.has(mat):
+				by_material[mat] = []
+			by_material[mat].append(mi)
+	for child in node.get_children():
+		_collect_mesh_instances(child, by_material, all)
 
 
 func _ensure_runtime_seed() -> void:
@@ -262,13 +360,25 @@ func _setup_materials() -> void:
 	_lamp_post_material.roughness = 0.44
 
 func _setup_foliage_assets() -> void:
+	# No GLB assets — use procedural cubes for all foliage
 	_flower_scenes.clear()
-	for asset_path in FLOWER_ASSET_PATHS:
-		var flower_scene := _load_optional_packed_scene(asset_path)
-		if flower_scene != null:
-			_flower_scenes.append(flower_scene)
-	_planter_bush_scene = _load_optional_packed_scene(PLANTER_BUSH_ASSET_PATH)
-	_cascade_plant_scene = _load_optional_packed_scene(CASCADE_PLANT_ASSET_PATH)
+	_planter_bush_scene = null
+	_cascade_plant_scene = null
+	_bush_material = null
+
+	# Create shared flower materials (6 colors)
+	if _flower_materials.is_empty():
+		for flower_color in [Color(0.95, 0.75, 0.20), Color(0.85, 0.30, 0.25), Color(0.85, 0.35, 0.80), Color(0.90, 0.50, 0.30), Color(0.70, 0.40, 0.90), Color(0.95, 0.85, 0.40)]:
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color = flower_color
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			_flower_materials.append(mat)
+
+	# Bush material
+	if _bush_material == null:
+		_bush_material = StandardMaterial3D.new()
+		_bush_material.albedo_color = Color(0.22, 0.45, 0.18)
+		_bush_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 
 func _default_lighting_state() -> Dictionary:
@@ -843,20 +953,21 @@ func _create_civic_plaza(x_band: Vector2, z_band: Vector2, block_top: float, gx:
 	_add_planter_segment(Vector3(plaza_x.y - planter_thickness * 0.55, plaza_top + planter_height * 0.5, plaza_z.y - planter_length_z * 0.5), Vector3(planter_thickness, planter_height, planter_length_z), Vector3(1.0, 0.0, 0.0), 0.8)
 
 	_add_prism_between(center_x, center_z, plaza_top, plaza_top + 0.34, _house_trim_material)
-	if _planter_bush_scene != null:
-		for corner in [
-			Vector3(lerpf(plaza_x.x, plaza_x.y, 0.30), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.30)),
-			Vector3(lerpf(plaza_x.x, plaza_x.y, 0.70), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.30)),
-			Vector3(lerpf(plaza_x.x, plaza_x.y, 0.30), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.70)),
-			Vector3(lerpf(plaza_x.x, plaza_x.y, 0.70), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.70))
-		]:
-			_add_scene_instance(_planter_bush_scene, corner, Vector3(0.52, 0.42, 0.52), Vector3(0.0, _rng.randf() * TAU, 0.0))
-	if not _flower_scenes.is_empty():
-		for bloom in [
-			Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top + 0.12, lerpf(plaza_z.x, plaza_z.y, 0.24)),
-			Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top + 0.12, lerpf(plaza_z.x, plaza_z.y, 0.76))
-		]:
-			_add_scene_instance(_flower_scenes[_positive_modulo(int(absf(bloom.z) * 10.0), _flower_scenes.size())], bloom, Vector3(0.28, 0.28, 0.28), Vector3(0.0, _rng.randf() * TAU, 0.0))
+	# Procedural bushes at plaza corners (cubes)
+	for corner in [
+		Vector3(lerpf(plaza_x.x, plaza_x.y, 0.30), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.30)),
+		Vector3(lerpf(plaza_x.x, plaza_x.y, 0.70), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.30)),
+		Vector3(lerpf(plaza_x.x, plaza_x.y, 0.30), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.70)),
+		Vector3(lerpf(plaza_x.x, plaza_x.y, 0.70), plaza_top + 0.18, lerpf(plaza_z.x, plaza_z.y, 0.70))
+	]:
+		_add_procedural_bush(corner, Vector3(0.52, 0.42, 0.52))
+	# Procedural flowers (flat tiles)
+	for bloom in [
+		Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top + 0.12, lerpf(plaza_z.x, plaza_z.y, 0.24)),
+		Vector3((plaza_x.x + plaza_x.y) * 0.5, plaza_top + 0.12, lerpf(plaza_z.x, plaza_z.y, 0.76))
+	]:
+		var fi: int = _positive_modulo(int(absf(bloom.z) * 10.0), maxi(1, _flower_materials.size()))
+		_add_procedural_flower(bloom, fi, 0.10)
 	if is_landmark:
 		var shaft_x := Vector2(lerpf(plaza_x.x, plaza_x.y, 0.455), lerpf(plaza_x.x, plaza_x.y, 0.545))
 		var shaft_z := Vector2(lerpf(plaza_z.x, plaza_z.y, 0.455), lerpf(plaza_z.x, plaza_z.y, 0.545))
@@ -1000,58 +1111,61 @@ func _add_planter_segment(center: Vector3, size: Vector3, outward: Vector3, drop
 func _add_planter_greenery(center: Vector3, size: Vector3, outward: Vector3, drop: float) -> void:
 	var primary_length: float = size.x if size.x > size.z else size.z
 	var along_x: bool = size.x > size.z
+
+	# Procedural bush cubes in planter
 	var bush_count: int = clampi(int(round(primary_length / 1.8)), 2, 5)
-	if _planter_bush_scene != null:
-		for i in range(bush_count):
-			var bush_t: float = 0.5 if bush_count == 1 else float(i) / float(bush_count - 1)
-			var bush_pos := center + Vector3(0.0, size.y * 0.5 + 0.02, 0.0)
-			if along_x:
-				bush_pos.x = lerpf(center.x - size.x * 0.30, center.x + size.x * 0.30, bush_t)
-				bush_pos.z += _rng.randf_range(-0.04, 0.04)
-			else:
-				bush_pos.z = lerpf(center.z - size.z * 0.30, center.z + size.z * 0.30, bush_t)
-				bush_pos.x += _rng.randf_range(-0.04, 0.04)
-			var bush_scale := Vector3(
-				_rng.randf_range(0.42, 0.62),
-				_rng.randf_range(0.32, 0.50),
-				_rng.randf_range(0.42, 0.62)
-			)
-			_add_scene_instance(_planter_bush_scene, bush_pos, bush_scale, Vector3(0.0, _rng.randf() * TAU, 0.0))
-	if not _flower_scenes.is_empty():
-		var flower_count: int = clampi(int(round(primary_length / 1.5)), 2, 6)
-		for i in range(flower_count):
-			var t: float = 0.5 if flower_count == 1 else float(i) / float(flower_count - 1)
-			var pos := center + Vector3(0.0, size.y * 0.5 + 0.05, 0.0)
-			if along_x:
-				pos.x = lerpf(center.x - size.x * 0.34, center.x + size.x * 0.34, t)
-				pos.z += _rng.randf_range(-0.06, 0.06)
-			else:
-				pos.z = lerpf(center.z - size.z * 0.34, center.z + size.z * 0.34, t)
-				pos.x += _rng.randf_range(-0.06, 0.06)
-			_add_scene_instance(_flower_scenes[(i + int(absf(center.x + center.z))) % _flower_scenes.size()], pos, Vector3(0.24, 0.24, 0.24), Vector3(0.0, _rng.randf() * TAU, 0.0))
-	if _cascade_plant_scene != null:
-		var cascade_count: int = clampi(int(round(primary_length / 2.8)), 1, 3)
-		for i in range(cascade_count):
-			var t2: float = 0.5 if cascade_count == 1 else float(i) / float(cascade_count - 1)
-			var lip := center + outward * (size.x * 0.5 if not along_x else size.z * 0.5)
-			if along_x:
-				lip.x = lerpf(center.x - size.x * 0.26, center.x + size.x * 0.26, t2)
-			else:
-				lip.z = lerpf(center.z - size.z * 0.26, center.z + size.z * 0.26, t2)
-			lip.y = center.y + size.y * 0.5 - minf(0.05, size.y * 0.2)
-			var spill_scale := Vector3(0.34, clampf(drop * 0.34, 0.48, 1.05), 0.34)
-			_add_scene_instance(_cascade_plant_scene, lip, spill_scale, Vector3(0.0, _rng.randf() * TAU, 0.0))
-			var vine_height: float = maxf(0.28, drop - 0.28)
-			var vine_depth: float = vine_thickness * 0.7
-			var vine_size := Vector3(maxf(0.12, size.x * 0.20), vine_height, vine_depth) if along_x else Vector3(vine_depth, vine_height, maxf(0.12, size.z * 0.20))
-			var vine_center := lip + outward * (vine_depth * 0.5) + Vector3(0.0, -vine_height * 0.5, 0.0)
-			var vine := MeshInstance3D.new()
-			var vine_mesh := BoxMesh.new()
-			vine_mesh.size = vine_size
-			vine.mesh = vine_mesh
-			vine.material_override = _vine_material
-			vine.position = vine_center
-			_generated_root.add_child(vine)
+	for i in range(bush_count):
+		var bush_t: float = 0.5 if bush_count == 1 else float(i) / float(bush_count - 1)
+		var bush_pos := center + Vector3(0.0, size.y * 0.5 + 0.02, 0.0)
+		if along_x:
+			bush_pos.x = lerpf(center.x - size.x * 0.30, center.x + size.x * 0.30, bush_t)
+			bush_pos.z += _rng.randf_range(-0.04, 0.04)
+		else:
+			bush_pos.z = lerpf(center.z - size.z * 0.30, center.z + size.z * 0.30, bush_t)
+			bush_pos.x += _rng.randf_range(-0.04, 0.04)
+		var bush_scale := Vector3(
+			_rng.randf_range(0.42, 0.62),
+			_rng.randf_range(0.32, 0.50),
+			_rng.randf_range(0.42, 0.62)
+		)
+		_add_procedural_bush(bush_pos, bush_scale)
+
+	# Procedural flower tiles in planter
+	var flower_count: int = clampi(int(round(primary_length / 1.5)), 2, 6)
+	for i in range(flower_count):
+		var t: float = 0.5 if flower_count == 1 else float(i) / float(flower_count - 1)
+		var pos := center + Vector3(0.0, size.y * 0.5 + 0.05, 0.0)
+		if along_x:
+			pos.x = lerpf(center.x - size.x * 0.34, center.x + size.x * 0.34, t)
+			pos.z += _rng.randf_range(-0.06, 0.06)
+		else:
+			pos.z = lerpf(center.z - size.z * 0.34, center.z + size.z * 0.34, t)
+			pos.x += _rng.randf_range(-0.06, 0.06)
+		_add_procedural_flower(pos, (i + int(absf(center.x + center.z))) % maxi(1, _flower_materials.size()), 0.10)
+
+	# Cascading vines — still procedural mesh
+	var cascade_count: int = clampi(int(round(primary_length / 2.8)), 1, 3)
+	for i in range(cascade_count):
+		var t2: float = 0.5 if cascade_count == 1 else float(i) / float(cascade_count - 1)
+		var lip := center + outward * (size.x * 0.5 if not along_x else size.z * 0.5)
+		if along_x:
+			lip.x = lerpf(center.x - size.x * 0.26, center.x + size.x * 0.26, t2)
+		else:
+			lip.z = lerpf(center.z - size.z * 0.26, center.z + size.z * 0.26, t2)
+		lip.y = center.y + size.y * 0.5 - minf(0.05, size.y * 0.2)
+		var spill_scale := Vector3(0.34, clampf(drop * 0.34, 0.48, 1.05), 0.34)
+		_add_procedural_bush(lip, spill_scale)
+		var vine_height: float = maxf(0.28, drop - 0.28)
+		var vine_depth: float = vine_thickness * 0.7
+		var vine_size := Vector3(maxf(0.12, size.x * 0.20), vine_height, vine_depth) if along_x else Vector3(vine_depth, vine_height, maxf(0.12, size.z * 0.20))
+		var vine_center := lip + outward * (vine_depth * 0.5) + Vector3(0.0, -vine_height * 0.5, 0.0)
+		var vine := MeshInstance3D.new()
+		var vine_mesh := BoxMesh.new()
+		vine_mesh.size = vine_size
+		vine.mesh = vine_mesh
+		vine.material_override = _vine_material
+		vine.position = vine_center
+		_generated_root.add_child(vine)
 
 func _add_scene_instance(scene: PackedScene, position: Vector3, scale_value: Vector3, rotation_value: Vector3 = Vector3.ZERO) -> void:
 	if scene == null:
@@ -1123,6 +1237,7 @@ func _make_barcelona_block_request(x_band: Vector2, z_band: Vector2, block_top: 
 		DISTRICT_HILLSIDE_QUARTER:
 			floor_max = maxi(floor_min, floor_max - 1)
 	var floor_count: int = block_rng.randi_range(floor_min, floor_max)
+	floor_count = clampi(floor_count, 2, 4)
 	var gap_size: float = 0.0 if block_rng.randf() < 0.6 else minf(barcelona_block_gap_size, min_side * 0.1)
 	return {
 		"module_id": 100,
@@ -1269,6 +1384,8 @@ func _create_house_mass(x_band: Vector2, z_band: Vector2, block_top: float, gx: 
 		DISTRICT_HILLSIDE_QUARTER:
 			if index % 3 != 0:
 				floors = maxi(min_floors, floors - 1)
+	# Cap at max 4 stories so buildings don't tower over the street
+	floors = clampi(floors, 1, 4)
 	var body_height: float = float(floors) * floor_height
 	var basement_height: float = 1.4
 	var top_y: float = block_top + basement_height + body_height
@@ -1595,8 +1712,6 @@ func _add_bakery_storefront_decor(x_band: Vector2, z_band: Vector2, block_top: f
 
 
 func _add_flower_box_row(x_band: Vector2, z_band: Vector2, height_y: float) -> void:
-	if _flower_scenes.is_empty():
-		return
 	var box_x := Vector2(lerpf(x_band.x, x_band.y, 0.24), lerpf(x_band.x, x_band.y, 0.76))
 	var box_z := Vector2(z_band.x - 0.14, z_band.x + 0.12)
 	_add_prism_between(box_x, box_z, height_y, height_y + 0.16, _planter_material)
@@ -1604,7 +1719,36 @@ func _add_flower_box_row(x_band: Vector2, z_band: Vector2, height_y: float) -> v
 	for i in range(flower_count):
 		var t: float = 0.5 if flower_count == 1 else float(i) / float(flower_count - 1)
 		var pos := Vector3(lerpf(box_x.x, box_x.y, t), height_y + 0.12, z_band.x + 0.02)
-		_add_scene_instance(_flower_scenes[(i + int(absf(pos.x) + absf(pos.z))) % _flower_scenes.size()], pos, Vector3(0.24, 0.24, 0.24), Vector3(0.0, _rng.randf() * TAU, 0.0))
+		_add_procedural_flower(pos, (i + int(absf(pos.x) + absf(pos.z))) % maxi(1, _flower_materials.size()), 0.08)
+
+
+## Procedural flower — flat colored tile (cube) instead of GLB mesh
+func _add_procedural_flower(position: Vector3, color_index: int, size: float = 0.12) -> void:
+	var mat: Material = _flower_materials[color_index % _flower_materials.size()]
+	var mi := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(size * 0.9, 0.04, size * 0.9)
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.position = position
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_generated_root.add_child(mi)
+
+
+## Procedural bush — green cube instead of GLB mesh
+func _add_procedural_bush(position: Vector3, scale: Vector3 = Vector3.ONE) -> void:
+	if _bush_material == null:
+		return
+	var mi := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.3, 0.3, 0.3)
+	mi.mesh = mesh
+	mi.material_override = _bush_material
+	mi.position = position
+	mi.scale = scale
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_generated_root.add_child(mi)
+
 
 func _add_top_prism(x_band: Vector2, z_band: Vector2, top_y: float, material: Material) -> void:
 	_add_prism_between(x_band, z_band, _city_base_y, top_y, material)

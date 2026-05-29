@@ -34,6 +34,7 @@ var _events_label: RichTextLabel
 var _pause_button: Button
 var _toggle_view_button: Button
 var _latest_event_button: Button
+var _fps_label: Label
 
 
 func _ready() -> void:
@@ -56,6 +57,15 @@ func _ready() -> void:
 	_wire_button("Panel/Margin/VBox/Controls/NextHousehold", _on_next_household)
 	_wire_button(TOGGLE_VIEW_PATH, _on_toggle_view)
 	_wire_button(LATEST_EVENT_PATH, _on_jump_to_latest_event)
+	# FPS counter — top-right corner
+	_fps_label = Label.new()
+	_fps_label.name = "FPSCounter"
+	_fps_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_fps_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_fps_label.position = Vector2(-10.0, 10.0)
+	_fps_label.add_theme_color_override("font_color", Color(0.6, 0.9, 0.6, 0.85))
+	_fps_label.add_theme_font_size_override("font_size", 14)
+	add_child(_fps_label)
 	for hidden_path in [
 		"Panel/Margin/VBox/Controls/CycleSpeed",
 		"Panel/Margin/VBox/Controls/Advance6Hours",
@@ -77,6 +87,13 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	# FPS counter — every frame
+	if _fps_label != null:
+		var fps: int = Performance.get_monitor(Performance.TIME_FPS)
+		var objects: int = Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)
+		var prims: int = Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+		var nodes: int = Performance.get_monitor(Performance.OBJECT_NODE_COUNT)
+		_fps_label.text = "%d FPS | %d obj | %dK tri | %d nodes" % [fps, objects, prims / 1000, nodes]
 	_refresh_accum += delta
 	if _refresh_accum >= 0.25:
 		_refresh_accum = 0.0

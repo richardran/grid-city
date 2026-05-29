@@ -1,12 +1,6 @@
 extends Node3D
 class_name PedestrianCrowd
 
-const PERSON_SCENE_PATHS := [
-	"res://assets/characters/pedestrian_man.glb",
-	"res://assets/characters/pedestrian_woman.glb",
-	"res://assets/characters/pedestrian_child.glb"
-]
-const DOG_SCENE_PATH := "res://assets/characters/dog_companion.glb"
 const DOG_TYPE := "dog"
 const PERSON_TYPES := ["man", "woman", "child"]
 const OPENROUTER_ENV_KEY := "OPENROUTER_API_KEY"
@@ -1094,12 +1088,8 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 	root.name = "Pedestrian_%02d_%s_%s" % [index, PERSON_TYPES[type_index], display_name.replace(" ", "_")]
 	add_child(root)
 	var visual: Node3D = null
-	if index < max_detailed_pedestrians:
-		var packed: PackedScene = _load_optional_scene(str(PERSON_SCENE_PATHS[type_index]))
-		if packed != null:
-			visual = packed.instantiate() as Node3D
-	if visual == null:
-		visual = _build_proxy_pedestrian_visual(PERSON_TYPES[type_index])
+	# Always use proxy visuals — no GLB assets
+	visual = _build_proxy_pedestrian_visual(PERSON_TYPES[type_index])
 	if visual == null:
 		root.queue_free()
 		return
@@ -1161,11 +1151,8 @@ func _spawn_dog(index: int, group_info: Dictionary = {}) -> void:
 	root.name = "Dog_%02d" % index
 	add_child(root)
 	var visual: Node3D = null
-	var packed: PackedScene = _load_optional_scene(DOG_SCENE_PATH)
-	if packed != null:
-		visual = packed.instantiate() as Node3D
-	if visual == null:
-		visual = _build_proxy_dog_visual()
+	# Always use proxy dog visual — no GLB assets
+	visual = _build_proxy_dog_visual()
 	if visual == null:
 		root.queue_free()
 		return
@@ -2556,7 +2543,7 @@ func _update_label_visibility() -> void:
 
 func _person_type_for_identity(identity: Dictionary) -> int:
 	if identity.is_empty():
-		return _rng.randi_range(0, PERSON_SCENE_PATHS.size() - 1)
+		return _rng.randi_range(0, PERSON_TYPES.size() - 1)
 	var age: int = int(identity.get("age", 30))
 	if age < 12:
 		return 2
@@ -2690,7 +2677,7 @@ func _spawn_event_effect(root: Node3D, event: Dictionary, cleanup_parent: bool =
 	caption.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	caption.pixel_size = 0.0065
 	caption.outline_modulate = Color(0.02, 0.03, 0.05, 0.96)
-	caption.position = Vector3(0.0, 6.8, 0.0)
+	caption.position = Vector3(0.0, 0.5, 0.0)
 	caption.text = _event_caption_for_type(event_type)
 	caption.modulate = _event_caption_color(event_type)
 	effect_root.add_child(caption)
@@ -2753,7 +2740,7 @@ func _spawn_world_event_effect(event: Dictionary) -> void:
 	world_anchor.position = anchor
 	add_child(world_anchor)
 	var scaled_event: Dictionary = event.duplicate(true)
-	scaled_event["effect_scale"] = float(event.get("effect_scale", 1.0)) * 3.8
+	scaled_event["effect_scale"] = float(event.get("effect_scale", 1.0))
 	scaled_event["effect_duration"] = _world_event_duration(event)
 	_spawn_event_effect(world_anchor, scaled_event, true)
 
@@ -3080,6 +3067,7 @@ func _make_glow_material(color: Color) -> StandardMaterial3D:
 
 func _build_proxy_pedestrian_visual(ped_type: String) -> Node3D:
 	var color: Color = PERSON_COLORS.get(ped_type, Color.WHITE)
+	# Capsule body + sphere head — "default person"
 	var visual := Node3D.new()
 	visual.name = "ProxyVisual"
 	var body := MeshInstance3D.new()
@@ -3089,6 +3077,7 @@ func _build_proxy_pedestrian_visual(ped_type: String) -> Node3D:
 	body.mesh = body_mesh
 	body.position = Vector3(0.0, 0.52 if ped_type != "child" else 0.38, 0.0)
 	body.material_override = _make_unshaded_material(color)
+	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	visual.add_child(body)
 	var head := MeshInstance3D.new()
 	var head_mesh := SphereMesh.new()
@@ -3097,6 +3086,7 @@ func _build_proxy_pedestrian_visual(ped_type: String) -> Node3D:
 	head.mesh = head_mesh
 	head.position = Vector3(0.0, 1.08 if ped_type != "child" else 0.82, 0.0)
 	head.material_override = _make_unshaded_material(color.lightened(0.25))
+	head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	visual.add_child(head)
 	return visual
 
