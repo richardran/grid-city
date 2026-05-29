@@ -637,13 +637,15 @@ static func _apply_glass_lighting(material: StandardMaterial3D, palette: String,
 	var warm_mix: float = clampf(0.60 + warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
 	material.albedo_color = Color(0.55, 0.55, 0.58, 0.35)
 	material.emission_enabled = true
-	if night > 0.5:
+	if night > 0.3:
+		var depth: float = clampf((night - 0.3) / 0.7, 0.0, 1.0)
+		var threshold: float = lerpf(1.0, 0.2, depth)
 		var seed_hash: float = fmod(float(absf(material.get_instance_id())) * 0.618 + 0.144, 1.0)
 		material.emission = Color(1.0, 0.60, 0.20)
-		if seed_hash < 0.35:
-			material.emission_energy_multiplier = 0.0
+		if seed_hash < threshold:
+			material.emission_energy_multiplier = 0.6 + seed_hash * 0.4
 		else:
-			material.emission_energy_multiplier = 0.4 + seed_hash * 0.6
+			material.emission_energy_multiplier = 0.0
 	else:
 		material.emission = Color(0.0, 0.0, 0.0)
 		material.emission_energy_multiplier = 0.0
