@@ -24,6 +24,14 @@ func _ready() -> void:
 	apply_atmosphere()
 
 
+func _unhandled_key_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and event.keycode == KEY_N:
+		var current: Dictionary = get_lighting_state(_current_hour())
+		var is_night: bool = float(current.get("night", 0.0)) > 0.5
+		print("Night toggle -> %s" % ["day" if is_night else "night"])
+		apply_atmosphere(2.0 if not is_night else 14.0)
+
+
 func _process(_delta: float) -> void:
 	var hour: float = _current_hour()
 	if is_equal_approx(hour, _last_visual_hour):
