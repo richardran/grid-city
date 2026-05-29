@@ -440,6 +440,7 @@ func _register_emissive_material(material: StandardMaterial3D, category: String,
 		"category": category,
 		"base_color": base_color,
 		"seed": seed,
+		"profile_index": _emissive_material_profiles.size(),  # unique per entry
 		"strength": strength,
 		"occupied": occupied,
 		"cool_color": cool_color
@@ -455,6 +456,7 @@ func _apply_emissive_profile(material: StandardMaterial3D, profile: Dictionary, 
 	var cool_color: Color = Color(profile.get("cool_color", Color(0.66, 0.80, 0.92)))
 	var strength: float = float(profile.get("strength", 1.0))
 	var occupied: float = float(profile.get("occupied", 1.0))
+	var profile_index: int = int(profile.get("profile_index", 0))
 	var daylight: float = float(state.get("daylight", 1.0))
 	var night: float = float(state.get("night", 0.0))
 	var blue_hour: float = float(state.get("blue_hour", 0.0))
@@ -489,7 +491,7 @@ func _apply_emissive_profile(material: StandardMaterial3D, profile: Dictionary, 
 			material.emission_energy_multiplier = lamp_pool_mix * 0.92
 		_:
 			# Evening: all windows warm-lit. Late night: random windows go dark.
-			var seed_hash: float = fmod(float(profile.get("seed", 1)) * 0.6180339887 + 0.144269504, 1.0)
+			var seed_hash: float = fmod(float(profile.get("seed", 1) + profile_index * 7919) * 0.6180339887 + 0.144269504, 1.0)
 			var warm_amber := Color(1.0, 0.60, 0.20)
 			material.albedo_color = Color(0.55, 0.55, 0.58, 0.35)
 			material.emission_enabled = true
