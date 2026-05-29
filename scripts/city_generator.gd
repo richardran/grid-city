@@ -117,6 +117,7 @@ var _stair_material: StandardMaterial3D
 var _foundation_material: StandardMaterial3D
 var _wall_material: StandardMaterial3D
 var _house_trim_material: StandardMaterial3D
+var _roof_tile_material: StandardMaterial3D
 var _house_body_materials: Array[StandardMaterial3D] = []
 var _track_material: StandardMaterial3D
 var _railing_material: StandardMaterial3D
@@ -168,6 +169,7 @@ func generate_city() -> void:
 	_create_roads()
 	_create_blocks()
 	_create_street_lamps()
+	_create_cube_trees()
 	apply_lighting_state(_default_lighting_state())
 
 
@@ -319,13 +321,20 @@ func _setup_materials() -> void:
 	_house_trim_material.albedo_color = Color(0.93, 0.89, 0.82)
 	_house_trim_material.roughness = 0.9
 
+	# Roof tile material — warm terracotta (Minecraft style)
+	_roof_tile_material = StandardMaterial3D.new()
+	_roof_tile_material.albedo_color = Color(0.72, 0.38, 0.22)
+	_roof_tile_material.roughness = 0.9
+
 	_house_body_materials.clear()
+	# Warm Minecraft-inspired palette: terracotta, ochre, brick, cream, slate blue, sage
 	for color in [
-		Color(0.72, 0.53, 0.45),
-		Color(0.63, 0.70, 0.79),
-		Color(0.82, 0.72, 0.55),
-		Color(0.66, 0.55, 0.71),
-		Color(0.76, 0.59, 0.62)
+		Color(0.77, 0.45, 0.35),  # terracotta
+		Color(0.86, 0.65, 0.42),  # warm ochre
+		Color(0.58, 0.68, 0.78),  # slate blue
+		Color(0.90, 0.84, 0.72),  # cream/beige
+		Color(0.65, 0.55, 0.72),  # mauve
+		Color(0.62, 0.72, 0.58),  # sage green
 	]:
 		var mat := StandardMaterial3D.new()
 		mat.albedo_color = color
@@ -747,6 +756,55 @@ func _add_street_lamp(position: Vector3) -> void:
 	pool.position = Vector3(0.0, 0.035, -0.34)
 	pool.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_root.add_child(pool)
+
+
+func _create_cube_trees() -> void:
+	# Minecraft-style cube trees at plaza block corners
+	var trunk_mat := StandardMaterial3D.new()
+	trunk_mat.albedo_color = Color(0.24, 0.16, 0.10)
+	trunk_mat.roughness = 0.95
+	var leaf_mat := StandardMaterial3D.new()
+	leaf_mat.albedo_color = Color(0.22, 0.52, 0.18)
+	leaf_mat.roughness = 0.95
+	var seen: Dictionary = {}
+	for slot in _building_slots:
+		var kind: String = str(slot.get("kind", ""))
+		if kind != "plaza" and kind != "civic_landmark":
+			continue
+		var center: Vector3 = Vector3(slot.get("center", Vector3.ZERO))
+		var top_y: float = float(slot.get("top_y", center.y))
+		for offset in [Vector3(-2.0, 0.0, -2.0), Vector3(2.0, 0.0, -2.0)]:
+			var pos: Vector3 = center + offset
+			var snapped: Vector3 = get_nearest_walk_ground_point(Vector3(pos.x, top_y, pos.z))
+			var key: String = "%d|%d" % [int(round(snapped.x * 2.0)), int(round(snapped.z * 2.0))]
+			if seen.has(key): continue
+			seen[key] = true
+			_add_cube_tree(snapped, trunk_mat, leaf_mat)
+
+
+func _add_cube_tree(pos: Vector3, trunk_mat: Material, leaf_mat: Material) -> void:
+	var tree_root := Node3D.new()
+	tree_root.name = "CubeTree_%d_%d" % [int(round(pos.x * 10.0)), int(round(pos.z * 10.0))]
+	tree_root.position = pos
+	_generated_root.add_child(tree_root)
+	var trunk := MeshInstance3D.new()
+	var trunk_msh := BoxMesh.new()
+	trunk_msh.size = Vector3(0.16, 1.4, 0.16)
+	trunk.mesh = trunk_msh
+	trunk.material_override = trunk_mat
+	trunk.position = Vector3(0.0, 0.7, 0.0)
+	trunk.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	tree_root.add_child(trunk)
+	for tier in range(3):
+		var canopy := MeshInstance3D.new()
+		var leaf_msh := BoxMesh.new()
+		var sz: float = 1.6 - float(tier) * 0.3
+		leaf_msh.size = Vector3(sz, 0.6, sz)
+		canopy.mesh = leaf_msh
+		canopy.material_override = leaf_mat
+		canopy.position = Vector3(0.0, 1.8 + float(tier) * 0.5, 0.0)
+		canopy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		tree_root.add_child(canopy)
 
 func _create_intersection(ix: int, iz: int) -> void:
 	var x_band: Vector2 = _road_band_x(ix)
@@ -1405,7 +1463,21 @@ func _create_house_mass(x_band: Vector2, z_band: Vector2, block_top: float, gx: 
 
 	_add_prism_between(x_band, z_band, block_top, block_top + basement_height, _wall_material)
 	_add_prism_between(x_band, z_band, block_top + basement_height, top_y, _house_body_materials[material_index])
-	_add_prism_between(Vector2(x_band.x - 0.06, x_band.y + 0.06), Vector2(z_band.x - 0.06, z_band.y + 0.06), top_y, top_y + 0.22, _house_trim_material)
+	# Roof — terracotta slab (Minecraft style), thicker than old trim
+	var roof_thickness: float = 0.28
+	var roof_overhang: float = 0.10
+	_add_prism_between(Vector2(x_band.x - roof_overhang, x_band.y + roof_overhang), Vector2(z_band.x - roof_overhang, z_band.y + roof_overhang), top_y, top_y + roof_thickness, _roof_tile_material)
+	# Chimney on 1 in 4 buildings
+	if index % 4 == 1 and floors >= 2:
+		var chimney_x: float = lerpf(x_band.x, x_band.y, 0.72 if index % 2 == 0 else 0.28)
+		var chimney_z: float = z_band.y - 0.30
+		var chimney := MeshInstance3D.new()
+		var chimney_mesh := BoxMesh.new()
+		chimney_mesh.size = Vector3(0.22, 0.5 + 0.08 * floors, 0.22)
+		chimney.mesh = chimney_mesh
+		chimney.material_override = _wall_material
+		chimney.position = Vector3(chimney_x, top_y + roof_thickness + 0.25 + 0.04 * floors, chimney_z)
+		_generated_root.add_child(chimney)
 
 	var front_x: Vector2 = Vector2(lerpf(x_band.x, x_band.y, 0.38), lerpf(x_band.x, x_band.y, 0.62))
 	var front_z: Vector2 = Vector2(z_band.x - 0.08, z_band.x + 0.04)
