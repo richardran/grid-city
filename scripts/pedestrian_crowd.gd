@@ -1118,11 +1118,14 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 	var label_node: Label3D = null
 	if show_identity_labels or _tracked_person_ids.has(int(identity.get("id", -1))):
 		label_node = _add_identity_label(root, identity)
+	# Generate traits once per pedestrian
+	var ped_traits: Dictionary = _generate_traits(identity, type_index)
 	_pedestrians.append({
 		"type": ped_type,
 		"root": root,
 		"visual": visual,
 		"identity": identity,
+		"traits": ped_traits,
 		"mode": mode,
 		"motivation": str(activity.get("motivation", "habit")),
 		"goal": str(activity.get("goal", mode)),
@@ -1130,7 +1133,7 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 		"initiative": "follow" if not group_info.is_empty() and str(group_info.get("role", "solo")) != "leader" else str(activity.get("initiative", "self")),
 		"initiator_person_id": int(group_info.get("leader_id", int(activity.get("initiator_id", int(identity.get("id", -1)))))),
 		"target": initial_target,
-		"speed": _pedestrian_speed_for_identity(ped_type, identity, mode) * speed_scale,
+		"speed": _pedestrian_speed_for_identity(ped_type, identity, mode, ped_traits) * speed_scale,
 		"group_id": str(group_info.get("id", "")),
 		"group_kind": str(group_info.get("kind", "solo")),
 		"group_role": str(group_info.get("role", "solo")),
@@ -1140,7 +1143,7 @@ func _spawn_pedestrian(index: int, identity: Dictionary = {}, group_info: Dictio
 		"gait_time": _rng.randf() * TAU,
 		"label_node": label_node,
 		"stuck_time": 0.0,
-		"pause_time": 0.0 if str(group_info.get("role", "solo")) != "leader" and not group_info.is_empty() else _random_pause_for_actor(ped_type, mode),
+		"pause_time": 0.0 if str(group_info.get("role", "solo")) != "leader" and not group_info.is_empty() else _random_pause_for_actor(ped_type, mode) * lerpf(1.4, 0.6, float(ped_traits.get("energy", 0.5))),
 		"meet_cooldown": 0.0,
 		"speech_cooldown": 0.0
 	})
@@ -1765,9 +1768,16 @@ func _find_conversation_partner(index: int, ped: Dictionary, candidate_indices: 
 		if score > best_score:
 			best_score = score
 			best_index = other_index
-	if best_index >= 0 and _rng.randf() <= conversation_share:
+	if best_index >= 0 and _rng.randf() <= _conversation_share_for(ped):
 		return best_index
 	return -1
+
+
+func _conversation_share_for(ped: Dictionary) -> float:
+	## Base conversation_share adjusted by sociability trait (subtle ±20% influence)
+	var base: float = conversation_share
+	var sociability: float = float(ped.get("traits", {}).get("sociability", 0.5))
+	return clampf(base * lerpf(0.80, 1.20, sociability), 0.05, 0.95)
 
 
 func _rebuild_pedestrian_spatial_index() -> void:
@@ -2558,6 +2568,22 @@ func _spawn_position_for_identity(identity: Dictionary) -> Vector3:
 	return _city.call("get_random_walk_point", 0.55)
 
 
+func _generate_traits(identity: Dictionary, type_index: int) -> Dictionary:
+	## Generate personality traits that subtly influence behavior.
+	## Returns {energy, sociability, curiosity} in range 0.0-1.0.
+	## Traits are seeded from person_id for consistency across sessions.
+	var person_id: int = int(identity.get("id", -1))
+	if person_id <= 0:
+		person_id = _rng.randi() % 9973 + 1
+	var trait_rng := RandomNumberGenerator.new()
+	trait_rng.seed = person_id * 7919
+	return {
+		"energy": trait_rng.randf_range(0.15, 0.85),
+		"sociability": trait_rng.randf_range(0.15, 0.85),
+		"curiosity": trait_rng.randf_range(0.15, 0.85)
+	}
+
+
 func _activity_for_identity(identity: Dictionary) -> Dictionary:
 	if identity.has("_activity"):
 		return Dictionary(identity.get("_activity", {})).duplicate(true)
@@ -2569,6 +2595,9 @@ func _activity_for_identity(identity: Dictionary) -> Dictionary:
 func _pick_target_for_pedestrian(ped: Dictionary, from_position: Vector3) -> Vector3:
 	var actor_type: String = str(ped.get("type", "person"))
 	var min_distance: float = dog_target_distance_min if actor_type == DOG_TYPE else target_distance_min
+	# Curiosity trait: curious people walk further (subtle ±30% influence)
+	var curiosity: float = float(ped.get("traits", {}).get("curiosity", 0.5))
+	min_distance *= lerpf(0.75, 1.35, curiosity)
 	var preferred_walk_kind: String = ""
 	if _population != null and _population.has_method("get_person_activity"):
 		var identity: Dictionary = ped.get("identity", {})
@@ -2595,7 +2624,7 @@ func _pick_target_for_pedestrian(ped: Dictionary, from_position: Vector3) -> Vec
 	return _city.call("get_random_walk_point", 0.55, preferred_walk_kind)
 
 
-func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mode: String) -> float:
+func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mode: String, traits: Dictionary = {}) -> float:
 	if actor_type == DOG_TYPE:
 		return _rng.randf_range(dog_walk_speed_min, dog_walk_speed_max)
 	var base_speed: float = _rng.randf_range(walk_speed_min, walk_speed_max)
@@ -2629,6 +2658,9 @@ func _pedestrian_speed_for_identity(actor_type: String, identity: Dictionary, mo
 			base_speed *= 0.76
 		"home":
 			base_speed *= 0.72
+	# Energy trait: subtle ±15% influence on speed (but doesn't dominate)
+	var energy: float = float(traits.get("energy", 0.5))
+	base_speed *= lerpf(0.85, 1.15, energy)
 	return base_speed
 
 

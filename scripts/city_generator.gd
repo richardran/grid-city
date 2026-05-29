@@ -1518,7 +1518,7 @@ func _create_house_mass(x_band: Vector2, z_band: Vector2, block_top: float, gx: 
 		"center": center,
 		"entry": entry,
 		"top_y": block_top,
-		"roof_y": top_y + 0.22,
+		"roof_y": top_y + 0.28,
 		"floors": floors,
 		"capacity": maxi(2, floors + 1),
 		"work_capacity": work_capacity,
