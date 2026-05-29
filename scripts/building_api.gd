@@ -337,13 +337,16 @@ static func clear_caches() -> void:
 
 static func apply_lighting_state(state: Dictionary) -> void:
 	_lighting_state = state.duplicate(true)
-	for key in ["default|glass", "painted_lady_mint|glass"]:
-		if not _material_cache.has(key):
+	for key in _material_cache.keys():
+		if not ("|glass" in String(key)):
 			continue
+		var parts: Array = String(key).split("|")
+		var palette: String = parts[0] if parts.size() >= 2 else "default"
+		var seed: int = int(parts[2]) if parts.size() >= 3 else 0
 		var material := _material_cache[key] as StandardMaterial3D
 		if material == null:
 			continue
-		_apply_glass_lighting(material, key.get_slice("|", 0), _lighting_state)
+		_apply_glass_lighting(material, palette, _lighting_state, seed)
 
 
 static func get_lighting_state() -> Dictionary:
@@ -407,6 +410,9 @@ static func _build_module_node(module_spec: Dictionary) -> Node3D:
 	module_node.position = _dict_to_vec3(module_spec.get("position", _vec3_dict(Vector3.ZERO)))
 	module_node.rotation_degrees = _dict_to_vec3(module_spec.get("rotation_degrees", _vec3_dict(Vector3.ZERO)))
 
+	# Unique seed per module for per-window random darkening
+	var glass_seed: int = abs(str(module_spec.get("identity", "100")).hash() * 31 + int(module_spec.get("index", 0)) * 17 + 1)
+
 	module_node.add_child(_make_piece("Wall_Left", Vector3(side_width, height, depth), Vector3(-(width - side_width) * 0.5, height * 0.5, 0.0), _material("wall", palette)))
 	module_node.add_child(_make_piece("Wall_Right", Vector3(side_width, height, depth), Vector3((width - side_width) * 0.5, height * 0.5, 0.0), _material("wall", palette)))
 	module_node.add_child(_make_piece("Wall_Bottom", Vector3(window_width, bottom_height, depth), Vector3(0.0, bottom_height * 0.5, 0.0), _material("wall", palette)))
@@ -414,27 +420,27 @@ static func _build_module_node(module_spec: Dictionary) -> Node3D:
 	module_node.add_child(_make_piece("Slab_Band", Vector3(width, slab_band_height, depth + 0.02), Vector3(0.0, height - slab_band_height * 0.5, 0.0), _material("trim", palette)))
 	match window_style:
 		"arch_top":
-			_add_arch_window_inserts(module_node, window, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette)
+			_add_arch_window_inserts(module_node, window, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette, glass_seed)
 		"checker":
-			_add_standard_window_inserts(module_node, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette)
+			_add_standard_window_inserts(module_node, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette, glass_seed)
 			_add_checker_mullions(module_node, window, window_width, window_height, window_center_y, depth, recess, frame_thickness, palette)
 		"twin":
-			_add_standard_window_inserts(module_node, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette)
+			_add_standard_window_inserts(module_node, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette, glass_seed)
 			_add_twin_window_details(module_node, window, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette)
 		_:
-			_add_standard_window_inserts(module_node, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette)
+			_add_standard_window_inserts(module_node, window_width, window_height, window_center_y, depth, recess, frame_thickness, frame_depth, palette, glass_seed)
 	return module_node
 
 
-static func _add_standard_window_inserts(module_node: Node3D, window_width: float, window_height: float, window_center_y: float, depth: float, recess: float, frame_thickness: float, frame_depth: float, palette: String = "default") -> void:
-	module_node.add_child(_make_piece("Glass", Vector3(window_width - 0.12, window_height - 0.12, 0.02), Vector3(0.0, window_center_y, depth * 0.5 - recess), _material("glass", palette)))
+static func _add_standard_window_inserts(module_node: Node3D, window_width: float, window_height: float, window_center_y: float, depth: float, recess: float, frame_thickness: float, frame_depth: float, palette: String = "default", glass_seed: int = 0) -> void:
+	module_node.add_child(_make_piece("Glass", Vector3(window_width - 0.12, window_height - 0.12, 0.02), Vector3(0.0, window_center_y, depth * 0.5 - recess), _material("glass", palette, glass_seed)))
 	module_node.add_child(_make_piece("Frame_Left", Vector3(frame_thickness, window_height, frame_depth), Vector3(-window_width * 0.5 + frame_thickness * 0.5, window_center_y, depth * 0.5 - recess * 0.5), _material("frame", palette)))
 	module_node.add_child(_make_piece("Frame_Right", Vector3(frame_thickness, window_height, frame_depth), Vector3(window_width * 0.5 - frame_thickness * 0.5, window_center_y, depth * 0.5 - recess * 0.5), _material("frame", palette)))
 	module_node.add_child(_make_piece("Frame_Top", Vector3(window_width, frame_thickness, frame_depth), Vector3(0.0, window_center_y + window_height * 0.5 - frame_thickness * 0.5, depth * 0.5 - recess * 0.5), _material("frame", palette)))
 	module_node.add_child(_make_piece("Frame_Bottom", Vector3(window_width, frame_thickness, frame_depth), Vector3(0.0, window_center_y - window_height * 0.5 + frame_thickness * 0.5, depth * 0.5 - recess * 0.5), _material("frame", palette)))
 
 
-static func _add_arch_window_inserts(module_node: Node3D, window: Dictionary, window_width: float, window_height: float, window_center_y: float, depth: float, recess: float, frame_thickness: float, frame_depth: float, palette: String = "default") -> void:
+static func _add_arch_window_inserts(module_node: Node3D, window: Dictionary, window_width: float, window_height: float, window_center_y: float, depth: float, recess: float, frame_thickness: float, frame_depth: float, palette: String = "default", glass_seed: int = 0) -> void:
 	var arch_height: float = clampf(float(window.get("arch_height", window_height * 0.36)), 0.34, minf(window_height * 0.48, window_width * 0.58))
 	var arch_rows: int = clampi(_to_int(window.get("arch_rows", 5), 5), 4, 6)
 	var base_height: float = maxf(0.72, window_height - arch_height)
@@ -447,7 +453,7 @@ static func _add_arch_window_inserts(module_node: Node3D, window: Dictionary, wi
 	var base_glass_height: float = maxf(0.18, base_height - frame_thickness * 2.4)
 	var base_glass_width: float = maxf(frame_thickness * 3.0, window_width - frame_thickness * 2.4)
 	var base_glass_center_y: float = window_bottom_y + frame_thickness + base_glass_height * 0.5
-	module_node.add_child(_make_piece("Glass_Base", Vector3(base_glass_width, base_glass_height, 0.02), Vector3(0.0, base_glass_center_y, glass_z), _material("glass", palette)))
+	module_node.add_child(_make_piece("Glass_Base", Vector3(base_glass_width, base_glass_height, 0.02), Vector3(0.0, base_glass_center_y, glass_z), _material("glass", palette, glass_seed)))
 	module_node.add_child(_make_piece("Frame_Left", Vector3(frame_thickness, base_height, frame_depth), Vector3(-opening_half_width + frame_thickness * 0.5, base_center_y, frame_z), _material("frame", palette)))
 	module_node.add_child(_make_piece("Frame_Right", Vector3(frame_thickness, base_height, frame_depth), Vector3(opening_half_width - frame_thickness * 0.5, base_center_y, frame_z), _material("frame", palette)))
 	module_node.add_child(_make_piece("Frame_Bottom", Vector3(window_width, frame_thickness, frame_depth), Vector3(0.0, window_bottom_y + frame_thickness * 0.5, frame_z), _material("frame", palette)))
@@ -571,8 +577,11 @@ static func _box_mesh(size: Vector3) -> BoxMesh:
 	return mesh
 
 
-static func _material(kind: String, palette: String = "default") -> StandardMaterial3D:
+static func _material(kind: String, palette: String = "default", seed: int = 0) -> StandardMaterial3D:
 	var key := "%s|%s" % [palette, kind]
+	# Glass materials need per-module variation for random window darkening
+	if kind == "glass" and seed != 0:
+		key = "%s|glass|%d" % [palette, seed]
 	if _material_cache.has(key):
 		return _material_cache[key]
 	var material := StandardMaterial3D.new()
@@ -592,7 +601,7 @@ static func _material(kind: String, palette: String = "default") -> StandardMate
 			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			material.metallic = 0.04
 			material.roughness = 0.06
-			_apply_glass_lighting(material, palette, _lighting_state)
+			_apply_glass_lighting(material, palette, _lighting_state, seed)
 		"painted_lady_mint|roof":
 			material.albedo_color = Color(0.37, 0.46, 0.47)
 			material.roughness = 0.76
@@ -611,7 +620,7 @@ static func _material(kind: String, palette: String = "default") -> StandardMate
 			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			material.metallic = 0.05
 			material.roughness = 0.08
-			_apply_glass_lighting(material, palette, _lighting_state)
+			_apply_glass_lighting(material, palette, _lighting_state, seed)
 		"default|roof":
 			material.albedo_color = Color(0.56, 0.59, 0.63)
 			material.roughness = 0.80
@@ -621,7 +630,7 @@ static func _material(kind: String, palette: String = "default") -> StandardMate
 	return material
 
 
-static func _apply_glass_lighting(material: StandardMaterial3D, palette: String, state: Dictionary) -> void:
+static func _apply_glass_lighting(material: StandardMaterial3D, palette: String, state: Dictionary, seed: int = 0) -> void:
 	var daylight: float = float(state.get("daylight", 1.0))
 	var night: float = float(state.get("night", 0.0))
 	var blue_hour: float = float(state.get("blue_hour", 0.0))
@@ -640,7 +649,7 @@ static func _apply_glass_lighting(material: StandardMaterial3D, palette: String,
 	if night > 0.3:
 		var depth: float = clampf((night - 0.3) / 0.7, 0.0, 1.0)
 		var threshold: float = lerpf(1.0, 0.2, depth)
-		var seed_hash: float = fmod(float(absf(material.get_instance_id())) * 0.618 + 0.144, 1.0)
+		var seed_hash: float = fmod(float(seed) * 0.6180339887 + 0.144269504, 1.0)
 		material.emission = Color(1.0, 0.60, 0.20)
 		if seed_hash < threshold:
 			material.emission_energy_multiplier = 0.6 + seed_hash * 0.4
