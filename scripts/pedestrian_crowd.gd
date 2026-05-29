@@ -2710,7 +2710,7 @@ func _spawn_event_effect(root: Node3D, event: Dictionary, cleanup_parent: bool =
 	caption.pixel_size = 0.0065
 	caption.outline_modulate = Color(0.02, 0.03, 0.05, 0.96)
 	caption.position = Vector3(0.0, 0.5, 0.0)
-	caption.text = _event_caption_for_type(event_type)
+	caption.text = _event_caption_for_type(event_type, event)
 	caption.modulate = _event_caption_color(event_type)
 	effect_root.add_child(caption)
 	match event_type:
@@ -2902,13 +2902,46 @@ func _animate_event_effect(node: Node3D, event_type: String, elapsed: float, t: 
 			_animate_death_effect(node, elapsed, t)
 
 
-func _event_caption_for_type(event_type: String) -> String:
+func _event_caption_for_type(event_type: String, event: Dictionary = {}) -> String:
 	match event_type:
 		"birth":
+			# Extract baby name from event text: "Birth: BabyName joined household N."
+			if event.has("text"):
+				var txt: String = str(event.get("text", ""))
+				var prefix: String = "Birth: "
+				var idx: int = txt.find(prefix)
+				if idx >= 0:
+					var rest: String = txt.substr(idx + prefix.length())
+					var end_idx: int = rest.find(" joined")
+					if end_idx > 0:
+						return rest.substr(0, end_idx)
 			return "new life"
 		"birthday":
+			# Extract name + age: "Birthday: Name is celebrating AGE."
+			if event.has("text"):
+				var txt: String = str(event.get("text", ""))
+				var prefix: String = "Birthday: "
+				var idx: int = txt.find(prefix)
+				if idx >= 0:
+					var rest: String = txt.substr(idx + prefix.length())
+					var end_idx: int = rest.find(" is celebrating")
+					if end_idx > 0:
+						return rest.substr(0, end_idx)
 			return "birthday"
 		"marriage":
+			# "Marriage: Name1 and Name2 paired up..."
+			if event.has("text"):
+				var txt: String = str(event.get("text", ""))
+				var prefix: String = "Marriage: "
+				var idx: int = txt.find(prefix)
+				if idx >= 0:
+					var rest: String = txt.substr(idx + prefix.length())
+					var end_idx: int = rest.find(" paired")
+					if end_idx > 0:
+						var names: String = rest.substr(0, end_idx)
+						# Replace " and " with " & " for compact display
+						names = names.replace(" and ", " & ")
+						return names
 			return "married"
 		"death":
 			return "farewell"

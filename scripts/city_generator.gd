@@ -21,7 +21,7 @@ const DISTRICT_HILLSIDE_QUARTER := "hillside_quarter"
 
 @export_group("Block Styles")
 @export var use_barcelona_block_mix: bool = true
-@export_range(0.0, 1.0, 0.05) var barcelona_block_chance: float = 0.35
+@export_range(0.0, 1.0, 0.05) var barcelona_block_chance: float = 0.15
 @export var barcelona_block_min_floors: int = 3
 @export var barcelona_block_max_floors: int = 6
 @export var barcelona_block_gap_size: float = 0.6
@@ -489,9 +489,9 @@ func _apply_emissive_profile(material: StandardMaterial3D, profile: Dictionary, 
 			material.emission_energy_multiplier = lamp_pool_mix * 0.92
 		_:
 			var window_mix: float = clampf((window_strength * occupied) + blue_hour * 0.08 * occupied, 0.0, 1.0)
-			material.albedo_color = Color(0.60, 0.76, 0.90, 0.46).lerp(base_color, clampf(window_mix * 0.72, 0.0, 1.0))
+			material.albedo_color = Color(0.95, 0.78, 0.58, 0.46).lerp(base_color, clampf(window_mix * 0.72, 0.0, 1.0))
 			material.emission_enabled = true
-			material.emission = cool_color.lerp(base_color, clampf(0.44 + warm_hour * 0.42 + night * 0.18, 0.0, 1.0))
+			material.emission = Color(0.98, 0.78, 0.48).lerp(base_color, clampf(0.44 + warm_hour * 0.42 + night * 0.18, 0.0, 1.0))
 			material.emission_energy_multiplier = lerpf(0.02, 0.12, daylight * 0.16 + blue_hour * 0.24) + window_mix * (0.22 + strength * 0.64)
 
 

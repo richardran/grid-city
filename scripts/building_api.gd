@@ -634,7 +634,7 @@ static func _apply_glass_lighting(material: StandardMaterial3D, palette: String,
 		day_glass = Color(0.68, 0.88, 0.90, 0.54)
 		cool_glass = Color(0.72, 0.90, 0.92, 0.58)
 	var night_mix: float = clampf(maxf(night * 0.95, blue_hour * 0.55), 0.0, 1.0)
-	var warm_mix: float = clampf(warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
+	var warm_mix: float = clampf(0.40 + warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
 	material.albedo_color = day_glass.lerp(cool_glass, blue_hour * 0.45).lerp(warm_glass, warm_mix)
 	material.emission_enabled = true
 	material.emission = cool_glass.lerp(warm_glass, warm_mix)
