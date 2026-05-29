@@ -489,10 +489,16 @@ func _apply_emissive_profile(material: StandardMaterial3D, profile: Dictionary, 
 			material.emission_energy_multiplier = lamp_pool_mix * 0.92
 		_:
 			var window_mix: float = clampf((window_strength * occupied) + blue_hour * 0.08 * occupied, 0.0, 1.0)
-			material.albedo_color = Color(0.95, 0.78, 0.58, 0.46).lerp(base_color, clampf(window_mix * 0.72, 0.0, 1.0))
+			# Warmer window color — campfire amber
+			var warm_amber := Color(1.0, 0.60, 0.25)
+			material.albedo_color = warm_amber.lerp(base_color, clampf(window_mix * 0.72, 0.0, 1.0))
 			material.emission_enabled = true
-			material.emission = Color(0.98, 0.78, 0.48).lerp(base_color, clampf(0.44 + warm_hour * 0.42 + night * 0.18, 0.0, 1.0))
-			material.emission_energy_multiplier = lerpf(0.02, 0.12, daylight * 0.16 + blue_hour * 0.24) + window_mix * (0.22 + strength * 0.64)
+			# Seed-based random occupancy: as night deepens, more windows go dark
+			# Uses a pseudo-random hash of the seed so each window behaves independently
+			var seed_hash: float = fmod(float(profile.get("seed", 1)) * 0.6180339887 + 0.144269504, 1.0)
+			var night_factor: float = clampf(1.0 - night * (0.3 + seed_hash * 0.5), 0.0, 1.0)
+			material.emission = warm_amber.lerp(base_color, clampf(0.44 + warm_hour * 0.42 + night * 0.18, 0.0, 1.0))
+			material.emission_energy_multiplier = lerpf(0.02, 0.12, daylight * 0.16 + blue_hour * 0.24) + window_mix * night_factor * (0.22 + strength * 0.64)
 
 
 func _make_window_glow_material(base_color: Color, category: String, seed: int, strength: float = 1.0, occupied: float = 1.0) -> StandardMaterial3D:

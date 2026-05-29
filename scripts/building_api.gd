@@ -627,18 +627,18 @@ static func _apply_glass_lighting(material: StandardMaterial3D, palette: String,
 	var blue_hour: float = float(state.get("blue_hour", 0.0))
 	var warm_hour: float = float(state.get("warm_hour", 0.0))
 	var window_strength: float = float(state.get("window_strength", 0.08))
-	var day_glass := Color(0.60, 0.80, 0.95, 0.46)
-	var warm_glass := Color(0.98, 0.84, 0.66, 0.58)
-	var cool_glass := Color(0.66, 0.86, 0.92, 0.52)
+	var day_glass := Color(0.90, 0.65, 0.40, 0.46)
+	var warm_glass := Color(1.0, 0.60, 0.25, 0.58)
+	var cool_glass := Color(0.95, 0.70, 0.42, 0.52)
 	if palette == "painted_lady_mint":
-		day_glass = Color(0.68, 0.88, 0.90, 0.54)
-		cool_glass = Color(0.72, 0.90, 0.92, 0.58)
+		day_glass = Color(0.80, 0.72, 0.58, 0.54)
+		cool_glass = Color(0.85, 0.75, 0.60, 0.58)
 	var night_mix: float = clampf(maxf(night * 0.95, blue_hour * 0.55), 0.0, 1.0)
-	var warm_mix: float = clampf(0.40 + warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
+	var warm_mix: float = clampf(0.60 + warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
 	material.albedo_color = day_glass.lerp(cool_glass, blue_hour * 0.45).lerp(warm_glass, warm_mix)
 	material.emission_enabled = true
 	material.emission = cool_glass.lerp(warm_glass, warm_mix)
-	material.emission_energy_multiplier = lerpf(0.04, 0.24, daylight * 0.18 + blue_hour * 0.28) + night_mix * window_strength
+	material.emission_energy_multiplier = lerpf(0.04, 0.24, daylight * 0.18 + blue_hour * 0.28) + night_mix * window_strength * maxf(0.0, 1.0 - night * 0.6)
 
 
 static func _normalize_roof_type(value: String) -> String:
