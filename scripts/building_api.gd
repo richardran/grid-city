@@ -635,10 +635,15 @@ static func _apply_glass_lighting(material: StandardMaterial3D, palette: String,
 		cool_glass = Color(0.85, 0.75, 0.60, 0.58)
 	var night_mix: float = clampf(maxf(night * 0.95, blue_hour * 0.55), 0.0, 1.0)
 	var warm_mix: float = clampf(0.60 + warm_hour * 0.35 + night * 0.88, 0.0, 1.0)
-	material.albedo_color = day_glass.lerp(cool_glass, blue_hour * 0.45).lerp(warm_glass, warm_mix)
+	material.albedo_color = Color(1.0, 0.60, 0.20)
 	material.emission_enabled = true
-	material.emission = cool_glass.lerp(warm_glass, warm_mix)
-	material.emission_energy_multiplier = lerpf(0.04, 0.24, daylight * 0.18 + blue_hour * 0.28) + night_mix * window_strength * maxf(0.0, 1.0 - night * 0.6)
+	material.emission = Color(1.0, 0.60, 0.20)
+	# Night: bright warm glow. Day: invisible.
+	if night > 0.5:
+		var seed_hash: float = fmod(float(absf(material.get_instance_id())) * 0.618 + 0.144, 1.0)
+		material.emission_energy_multiplier = 0.2 + seed_hash * 0.8
+	else:
+		material.emission_energy_multiplier = 0.02
 
 
 static func _normalize_roof_type(value: String) -> String:
