@@ -562,7 +562,7 @@ func select_person(person_id: int, sync_visualization: bool = true) -> void:
 func _pick_person_at_screen(screen_position: Vector2) -> void:
 	if _crowd == null or _camera == null or not _crowd.has_method("pick_person_from_screen"):
 		return
-	var hit: Dictionary = _crowd.call("pick_person_from_screen", _camera, screen_position, 38.0)
+	var hit: Dictionary = _crowd.call("pick_person_from_screen", _camera, screen_position, 70.0)
 	if hit.is_empty():
 		return
 	var person_id: int = int(hit.get("person_id", -1))
